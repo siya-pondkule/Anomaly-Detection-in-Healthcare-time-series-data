@@ -26,3 +26,10 @@ The dataset comprises a total of 495,446 data points with twelve columns. These 
 10. Mz: magnitude on the z axis of the magnetometer.
 11. User: unique identification number for each user.
 12. Activity: name of an activity being performed.
+
+| Type                   | Example                                                     |
+| ---------------------- | ----------------------------------------------------------- |
+| Sensor Value Anomalies | Spikes, missing, frozen, out-of-range readings              |
+| Temporal Anomalies     | Irregular timestamps, sudden jumps, repeated noise patterns |
+| Behavioral Anomalies   | Unexpected movement for the labeled activity                |
+| User-level Anomalies   | Outlier motion patterns unique to a user                    |
