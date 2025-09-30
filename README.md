@@ -17,12 +17,12 @@ The dataset comprises a total of 495,446 data points with twelve columns. These 
 1. TimeStamp: time stamp of a record with sampling rate of 50 Hz.
 2. Gx: angular velocity on the x axis of the gyroscope.
 3. Gy: angular velocity on the y axis of the gyroscope.
-•Gz: angular velocity on the z axis of the gyroscope.
-•Ax: acceleration on the x axis of the accelerometer.
-•Ay: acceleration on the y axis of the accelerometer.
-•Az: acceleration on the z axis of the accelerometer.
-•Mx: magnitude on the x axis of the magnetometer.
-•My: magnitude on the y axis of the magnetometer.
-•Mz: magnitude on the z axis of the magnetometer.
-•User: unique identification number for each user.
-•Activity: name of an activity being performed.
+4. Gz: angular velocity on the z axis of the gyroscope.
+5. Ax: acceleration on the x axis of the accelerometer.
+6. Ay: acceleration on the y axis of the accelerometer.
+7. Az: acceleration on the z axis of the accelerometer.
+8. Mx: magnitude on the x axis of the magnetometer.
+9. My: magnitude on the y axis of the magnetometer.
+10. Mz: magnitude on the z axis of the magnetometer.
+11. User: unique identification number for each user.
+12. Activity: name of an activity being performed.
