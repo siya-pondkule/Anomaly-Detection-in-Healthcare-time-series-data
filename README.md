@@ -14,9 +14,9 @@ Anomalies in ICU Monitoring
 Wearables Dataset
 This folder contains the data file “StresSense.csv”.
 The dataset comprises a total of 495,446 data points with twelve columns. These columns include a timestamp, user ID, activity label, and three-dimensional values from the accelerometer (A), gyroscope (G), and magnetometer (M), labeled as follows [1].
-•TimeStamp: time stamp of a record with sampling rate of 50 Hz.
-•Gx: angular velocity on the x axis of the gyroscope.
-•Gy: angular velocity on the y axis of the gyroscope.
+1. TimeStamp: time stamp of a record with sampling rate of 50 Hz.
+2. Gx: angular velocity on the x axis of the gyroscope.
+3. Gy: angular velocity on the y axis of the gyroscope.
 •Gz: angular velocity on the z axis of the gyroscope.
 •Ax: acceleration on the x axis of the accelerometer.
 •Ay: acceleration on the y axis of the accelerometer.
