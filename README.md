@@ -1,4 +1,4 @@
-Autoencoder
+Autoencoder:-
 An autoencoder is a type of neural network used for unsupervised learning. It tries to reconstruct its input.
 
 Training:
