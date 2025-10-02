@@ -5,6 +5,7 @@ import matplotlib.pyplot as plt
 from sklearn.preprocessing import StandardScaler
 import tensorflow as tf
 from tensorflow.keras import layers, models
+from sklearn.metrics import mean_squared_error, r2_score
 
 # ======================
 # Paths & Config
@@ -177,3 +178,39 @@ print()
 history = autoencoder.fit(X_scaled, X_scaled, epochs=50, batch_size=32, validation_split=0.1, verbose=0)
 print(f"Final training loss: {history.history['loss'][-1]:.4f}")
 print(f"Final validation loss: {history.history['val_loss'][-1]:.4f}")
+
+reconstructions = autoencoder.predict(X_scaled)
+
+# Compute reconstruction error (MSE)
+mse = mean_squared_error(X_scaled, reconstructions)
+print(f"Reconstruction MSE: {mse:.4f}")
+
+# Optionally compute R² score (like a regression accuracy)
+r2 = r2_score(X_scaled, reconstructions)
+print(f"Reconstruction R² Score: {r2:.4f}")
+
+# You can also compute reconstruction "accuracy" as similarity %
+accuracy = 100 * (1 - mse)
+print(f"Reconstruction Accuracy (approx): {accuracy:.2f}%")
+
+mse_per_row = np.mean(np.square(X_scaled - reconstructions), axis=1)
+
+# Put errors in a DataFrame
+errors_df = pd.DataFrame({
+    "ReconstructionError": mse_per_row
+})
+
+# Set anomaly threshold (95th percentile is common)
+threshold = np.percentile(mse_per_row, 95)
+print(f"Anomaly Detection Threshold (95th percentile): {threshold:.6f}")
+
+# Label anomalies
+errors_df["Anomaly"] = errors_df["ReconstructionError"] > threshold
+
+# Count anomalies
+num_anomalies = errors_df["Anomaly"].sum()
+print(f"Detected {num_anomalies} anomalies out of {len(errors_df)} rows")
+
+# Optional: Save anomaly results
+errors_df.to_csv(OUTPUT_DIR / "../anomaly_detection_results.csv", index=False)
+print("Anomaly detection results saved → anomaly_detection_results.csv")
