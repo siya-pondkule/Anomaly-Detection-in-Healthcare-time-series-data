@@ -132,7 +132,7 @@ for file in DATASETS_DIR.rglob("*.csv"):
         # Select columns with at least one numeric value
         numeric_cols = df.columns[df.notna().any()].tolist()
         if not numeric_cols:
-            print("⚠️ No numeric columns found.")
+            print("No numeric columns found.")
             continue
 
         # Detect anomalies for all numeric columns
