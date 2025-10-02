@@ -30,3 +30,10 @@ Automatic anomaly detection: Detect unusual data without explicit rules.
 Noise reduction: Autoencoder smooths out minor anomalies by learning normal patterns.
 Future readiness: Once trained, the model can predict anomalies in new ICU data without manually setting thresholds.
 Unsupervised learning: Works even when you don’t have labeled anomalies, which is typical in ICU datasets.
+
+Strengths of my approach vs. the research paper which i refer
+1. No SMOTE/data leakage risk.
+2. Richer anomaly handling (threshold-based + autoencoder reconstruction errors).
+3. Multiple metrics (MSE, R², anomaly %), not just AUROC.
+4. More robust missing-data filling pipeline.
+5. correct anomalies and save “cleaned” datasets (they only predicted mortality).
