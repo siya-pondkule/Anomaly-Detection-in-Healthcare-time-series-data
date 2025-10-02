@@ -1,3 +1,5 @@
+Research Paper on ICU Monitoring - https://journals.sagepub.com/doi/full/10.1177/1460458219850323
+
 Anomalies in ICU Monitoring
 1. Vital Signs Anomalies
 2. Heart rate (HR): tachycardia, bradycardia, sudden fluctuations.
