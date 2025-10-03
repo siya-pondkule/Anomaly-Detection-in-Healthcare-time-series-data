@@ -1,4 +1,4 @@
-# ICU anomaly detection + correction + optional mortality prediction
+# ICU anomaly detection + correction +  mortality prediction
 
 import os
 from pathlib import Path
