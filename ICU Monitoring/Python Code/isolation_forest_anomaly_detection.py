@@ -3,19 +3,18 @@ import numpy as np
 from pathlib import Path
 import matplotlib.pyplot as plt
 from sklearn.preprocessing import StandardScaler
-import tensorflow as tf
-from tensorflow.keras import layers, models
+from sklearn.ensemble import IsolationForest
 from sklearn.metrics import mean_squared_error, r2_score
 
 # ======================
-# Paths & Config
+# Directories
 # ======================
 DATASETS_DIR = Path(r"d:\Anomaly Detection\ICU Monitoring\Datasets")
-OUTPUT_DIR = DATASETS_DIR / "../ModelResults"
-OUTPUT_DIR.mkdir(exist_ok=True)
+OUTPUT_DIR = DATASETS_DIR / "../Isolation-ModelResults"
+OUTPUT_DIR.mkdir(exist_ok=True, parents=True)
 
 # ======================
-# Thresholds for vitals
+# Thresholds and Vital Sign Mappings
 # ======================
 TH = {
     "HR_tachy": 100, "HR_brady": 60,
@@ -23,11 +22,9 @@ TH = {
     "DBP_high": 90, "DBP_low": 60,
     "MAP_high": 110, "MAP_low": 70,
     "RR_tachypnea": 24, "RR_apnea": 8,
-    "SpO2_low": 90,
-    "Temp_high": 38.5, "Temp_low": 35.0
+    "SpO2_low": 90, "Temp_high": 38.5, "Temp_low": 35.0
 }
 
-# Vital column mapping
 VITAL_MAPPING = {
     "HR": ["Pulse", "HeartRate", "HR", "PR"],
     "SBP": ["SysBP", "SBP", "SystolicBP", "SYS"],
@@ -39,7 +36,7 @@ VITAL_MAPPING = {
 }
 
 # ======================
-# Anomaly detection
+# Detect anomalies based on thresholds
 # ======================
 def detect_anomalies(series, col_name):
     anomalies = []
@@ -75,50 +72,45 @@ def detect_anomalies(series, col_name):
             anomalies += [{"vital": col_name, "index": i} for i in series[series > TH["Temp_high"]].index]
             anomalies += [{"vital": col_name, "index": i} for i in series[series < TH["Temp_low"]].index]
     else:
-        # Generic z-score
+        # generic z-score detection
         z = (series - series.mean()) / series.std(ddof=0)
         anomalies += [{"vital": col_name, "index": i} for i in series[np.abs(z) > 3].index]
 
     return anomalies
 
 # ======================
-# Plot anomalies
+# Plot corrected vs original
 # ======================
 def plot_corrected(df_original, df_corrected, anomalies, file_name):
     plt.figure(figsize=(14,6))
     numeric_cols = df_original.select_dtypes(include=[np.number]).columns
     for col in numeric_cols:
         if col in df_corrected.columns:
-            plt.plot(df_original[col], label=f"{col} original", alpha=0.5)
-            plt.plot(df_corrected[col], label=f"{col} corrected", alpha=0.9)
+            plt.plot(df_original[col], label=f"{col} (original)", alpha=0.5)
+            plt.plot(df_corrected[col], label=f"{col} (corrected)", alpha=0.9)
     for anom in anomalies:
         if anom["vital"] in df_corrected.columns:
             plt.scatter(anom["index"], df_original.loc[anom["index"], anom["vital"]], color="red", marker="x")
-    plt.title(f"Anomaly Correction - {file_name}")
+    plt.title(f"Anomaly Correction (Isolation Forest) - {file_name}")
     plt.xlabel("Index")
     plt.ylabel("Value")
     plt.legend()
-    plt.grid(True)
     plt.tight_layout()
-    plt.savefig(OUTPUT_DIR / f"{file_name}_corrected_graph.png")
+    plt.savefig(OUTPUT_DIR / f"{file_name}_isoforest_plot.png")
     plt.close()
 
 # ======================
-# Process all files
+# Main processing loop
 # ======================
+accuracy_summary = []
+
 for file in DATASETS_DIR.rglob("*.csv"):
-    print(f"\n=== Processing {file.name} ===")
+    print(f"\n=== Processing {file.name} (Isolation Forest) ===")
     try:
         df = pd.read_csv(file, low_memory=False)
-
-        # Convert all columns to numeric if possible
-        for col in df.columns:
-            df[col] = pd.to_numeric(df[col], errors='coerce')
-
-        # Drop columns with all NaNs
-        df = df.dropna(axis=1, how='all')
+        df = df.apply(pd.to_numeric, errors='coerce').dropna(axis=1, how='all')
         if df.empty:
-            print("⚠️ No valid numeric data found.")
+            print("⚠️ Skipped empty dataset.")
             continue
 
         # Detect anomalies
@@ -126,91 +118,64 @@ for file in DATASETS_DIR.rglob("*.csv"):
         for col in df.columns:
             anomalies += detect_anomalies(df[col], col)
 
-        # Mask anomalies
         df_clean = df.copy()
-        for anom in anomalies:
-            df_clean.loc[anom['index'], anom['vital']] = np.nan
-
-        # Fill missing values
+        for a in anomalies:
+            if a['vital'] in df_clean.columns:
+                df_clean.loc[a['index'], a['vital']] = np.nan
         df_clean = df_clean.interpolate().ffill().bfill()
-        df_clean = df_clean.apply(pd.to_numeric, errors='coerce')
-
-        # Drop constant columns (zero variance)
-        df_clean = df_clean.loc[:, df_clean.nunique() > 1]
-
-        # Safety check: replace remaining NaNs with column mean
-        df_clean = df_clean.fillna(df_clean.mean())
 
         # Scale data
         scaler = StandardScaler()
-        X_scaled = scaler.fit_transform(df_clean.values.astype(float))  # ensure float
+        X_scaled = scaler.fit_transform(df_clean)
 
-        # Build Autoencoder
-        input_dim = X_scaled.shape[1]
-        autoencoder = models.Sequential([
-            layers.Input(shape=(input_dim,)),
-            layers.Dense(64, activation='relu'),
-            layers.Dense(32, activation='relu'),
-            layers.Dense(64, activation='relu'),
-            layers.Dense(input_dim, activation='linear')
-        ])
-        autoencoder.compile(optimizer='adam', loss='mse')
-        autoencoder.fit(X_scaled, X_scaled, epochs=50, batch_size=32, validation_split=0.1, verbose=0)
+        # Isolation Forest
+        model = IsolationForest(contamination=0.05, random_state=42)
+        preds = model.fit_predict(X_scaled)
 
-        # Correct data using Autoencoder
-        reconstructions = autoencoder.predict(X_scaled)
-        df_corrected = pd.DataFrame(scaler.inverse_transform(reconstructions), columns=df_clean.columns)
+        # Mark anomalies
+        anomaly_mask = preds == -1
+        df_corrected = df_clean.copy()
+        df_corrected.loc[anomaly_mask] = np.nan
+        df_corrected = df_corrected.interpolate().ffill().bfill()
 
-        # Save corrected CSV
-        corrected_path = OUTPUT_DIR / f"{file.stem}_corrected.csv"
-        df_corrected.to_csv(corrected_path, index=False)
-        print(f"✅ Corrected data saved → {corrected_path}")
-        print(f"Detected {len(anomalies)} anomalies, corrected using Autoencoder.")
+        # Save corrected data
+        out_path = OUTPUT_DIR / f"{file.stem}_corrected_isoforest.csv"
+        df_corrected.to_csv(out_path, index=False)
+        print(f"✅ Corrected data saved → {out_path}")
 
-        # Plot before/after
+        # Plot graph
         plot_corrected(df, df_corrected, anomalies, file.stem)
 
+        # Compute metrics
+        mse = mean_squared_error(df_clean, df_corrected)
+        r2 = r2_score(df_clean, df_corrected)
+        acc = 100 * (1 - mse / np.var(df_clean.values))
+
+        print(f"MSE={mse:.6f} | R²={r2:.4f} | Accuracy≈{acc:.2f}% | Anomalies={len(anomalies)}")
+
+        accuracy_summary.append({
+            "File": file.name,
+            "MSE": mse,
+            "R2": r2,
+            "Accuracy (%)": acc,
+            "Anomalies Detected": len(anomalies)
+        })
+
     except Exception as e:
-        print(f"❌ Error processing {file.name}: {e}")
+        print(f"❌ Error in {file.name}: {e}")
 
-print()
+# ======================
+# Save overall accuracy summary
+# ======================
+if accuracy_summary:
+    summary_df = pd.DataFrame(accuracy_summary)
+    avg_acc = summary_df["Accuracy (%)"].mean()
+    summary_df["Average Accuracy (%)"] = avg_acc
 
-history = autoencoder.fit(X_scaled, X_scaled, epochs=50, batch_size=32, validation_split=0.1, verbose=0)
-print(f"Final training loss: {history.history['loss'][-1]:.4f}")
-print(f"Final validation loss: {history.history['val_loss'][-1]:.4f}")
-
-reconstructions = autoencoder.predict(X_scaled)
-
-# Compute reconstruction error (MSE)
-mse = mean_squared_error(X_scaled, reconstructions)
-print(f"Reconstruction MSE: {mse:.4f}")
-
-# Optionally compute R² score (like a regression accuracy)
-r2 = r2_score(X_scaled, reconstructions)
-print(f"Reconstruction R² Score: {r2:.4f}")
-
-# You can also compute reconstruction "accuracy" as similarity %
-accuracy = 100 * (1 - mse)
-print(f"Reconstruction Accuracy (approx): {accuracy:.2f}%")
-
-mse_per_row = np.mean(np.square(X_scaled - reconstructions), axis=1)
-
-# Put errors in a DataFrame
-errors_df = pd.DataFrame({
-    "ReconstructionError": mse_per_row
-})
-
-# Set anomaly threshold (95th percentile is common)
-threshold = np.percentile(mse_per_row, 95)
-print(f"Anomaly Detection Threshold (95th percentile): {threshold:.6f}")
-
-# Label anomalies
-errors_df["Anomaly"] = errors_df["ReconstructionError"] > threshold
-
-# Count anomalies
-num_anomalies = errors_df["Anomaly"].sum()
-print(f"Detected {num_anomalies} anomalies out of {len(errors_df)} rows")
-
-# Optional: Save anomaly results
-errors_df.to_csv(OUTPUT_DIR / "../anomaly_detection_results.csv", index=False)
-print("Anomaly detection results saved → anomaly_detection_results.csv")
+    summary_path = OUTPUT_DIR / "isolationforest_accuracy_summary.csv"
+    summary_df.to_csv(summary_path, index=False)
+    print(f"\n✅ Isolation Forest Accuracy Summary saved → {summary_path}")
+    print(summary_df)
+    print(f"\n📊 Overall Average Isolation Forest Accuracy: {avg_acc:.2f}%")
+else:
+    print("\n⚠️ No results generated to summarize.")

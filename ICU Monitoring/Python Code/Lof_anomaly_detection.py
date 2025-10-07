@@ -3,15 +3,14 @@ import numpy as np
 from pathlib import Path
 import matplotlib.pyplot as plt
 from sklearn.preprocessing import StandardScaler
-import tensorflow as tf
-from tensorflow.keras import layers, models
+from sklearn.neighbors import LocalOutlierFactor
 from sklearn.metrics import mean_squared_error, r2_score
 
 # ======================
 # Paths & Config
 # ======================
 DATASETS_DIR = Path(r"d:\Anomaly Detection\ICU Monitoring\Datasets")
-OUTPUT_DIR = DATASETS_DIR / "../ModelResults"
+OUTPUT_DIR = DATASETS_DIR / "../LOF-ModelResults"
 OUTPUT_DIR.mkdir(exist_ok=True)
 
 # ======================
@@ -39,7 +38,7 @@ VITAL_MAPPING = {
 }
 
 # ======================
-# Anomaly detection
+# Anomaly detection (threshold-based)
 # ======================
 def detect_anomalies(series, col_name):
     anomalies = []
@@ -75,7 +74,6 @@ def detect_anomalies(series, col_name):
             anomalies += [{"vital": col_name, "index": i} for i in series[series > TH["Temp_high"]].index]
             anomalies += [{"vital": col_name, "index": i} for i in series[series < TH["Temp_low"]].index]
     else:
-        # Generic z-score
         z = (series - series.mean()) / series.std(ddof=0)
         anomalies += [{"vital": col_name, "index": i} for i in series[np.abs(z) > 3].index]
 
@@ -94,123 +92,89 @@ def plot_corrected(df_original, df_corrected, anomalies, file_name):
     for anom in anomalies:
         if anom["vital"] in df_corrected.columns:
             plt.scatter(anom["index"], df_original.loc[anom["index"], anom["vital"]], color="red", marker="x")
-    plt.title(f"Anomaly Correction - {file_name}")
+    plt.title(f"LOF Anomaly Correction - {file_name}")
     plt.xlabel("Index")
     plt.ylabel("Value")
     plt.legend()
     plt.grid(True)
     plt.tight_layout()
-    plt.savefig(OUTPUT_DIR / f"{file_name}_corrected_graph.png")
+    plt.savefig(OUTPUT_DIR / f"{file_name}_LOF_corrected_graph.png")
     plt.close()
 
 # ======================
 # Process all files
 # ======================
+accuracy_list = []
+
 for file in DATASETS_DIR.rglob("*.csv"):
     print(f"\n=== Processing {file.name} ===")
     try:
         df = pd.read_csv(file, low_memory=False)
 
-        # Convert all columns to numeric if possible
         for col in df.columns:
             df[col] = pd.to_numeric(df[col], errors='coerce')
-
-        # Drop columns with all NaNs
         df = df.dropna(axis=1, how='all')
         if df.empty:
             print("⚠️ No valid numeric data found.")
             continue
 
-        # Detect anomalies
         anomalies = []
         for col in df.columns:
             anomalies += detect_anomalies(df[col], col)
 
-        # Mask anomalies
         df_clean = df.copy()
         for anom in anomalies:
             df_clean.loc[anom['index'], anom['vital']] = np.nan
 
-        # Fill missing values
         df_clean = df_clean.interpolate().ffill().bfill()
         df_clean = df_clean.apply(pd.to_numeric, errors='coerce')
-
-        # Drop constant columns (zero variance)
         df_clean = df_clean.loc[:, df_clean.nunique() > 1]
-
-        # Safety check: replace remaining NaNs with column mean
         df_clean = df_clean.fillna(df_clean.mean())
 
-        # Scale data
         scaler = StandardScaler()
-        X_scaled = scaler.fit_transform(df_clean.values.astype(float))  # ensure float
+        X_scaled = scaler.fit_transform(df_clean.values.astype(float))
 
-        # Build Autoencoder
-        input_dim = X_scaled.shape[1]
-        autoencoder = models.Sequential([
-            layers.Input(shape=(input_dim,)),
-            layers.Dense(64, activation='relu'),
-            layers.Dense(32, activation='relu'),
-            layers.Dense(64, activation='relu'),
-            layers.Dense(input_dim, activation='linear')
-        ])
-        autoencoder.compile(optimizer='adam', loss='mse')
-        autoencoder.fit(X_scaled, X_scaled, epochs=50, batch_size=32, validation_split=0.1, verbose=0)
+        # LOF Model
+        lof = LocalOutlierFactor(n_neighbors=20, contamination=0.05)
+        y_pred = lof.fit_predict(X_scaled)
 
-        # Correct data using Autoencoder
-        reconstructions = autoencoder.predict(X_scaled)
-        df_corrected = pd.DataFrame(scaler.inverse_transform(reconstructions), columns=df_clean.columns)
+        df_corrected = df_clean.copy()
+        anomalies_idx = np.where(y_pred == -1)[0]
+        for i in anomalies_idx:
+            df_corrected.iloc[i] = np.nan
+        df_corrected = df_corrected.interpolate().ffill().bfill()
 
         # Save corrected CSV
-        corrected_path = OUTPUT_DIR / f"{file.stem}_corrected.csv"
+        corrected_path = OUTPUT_DIR / f"{file.stem}_LOF_corrected.csv"
         df_corrected.to_csv(corrected_path, index=False)
-        print(f"✅ Corrected data saved → {corrected_path}")
-        print(f"Detected {len(anomalies)} anomalies, corrected using Autoencoder.")
+        print(f"✅ LOF corrected data saved → {corrected_path}")
+        print(f"Detected {len(anomalies_idx)} anomalies using LOF.")
 
         # Plot before/after
         plot_corrected(df, df_corrected, anomalies, file.stem)
 
+        # Accuracy Metrics
+       # Accuracy Metrics (updated)
+        row_errors = np.mean((df_clean - df_corrected)**2, axis=1)
+        mse = row_errors.mean()
+        r2 = r2_score(df_clean, df_corrected)
+        accuracy = 100 * (1 - mse / row_errors.max())  # normalized
+        accuracy_list.append(accuracy)
+        print(f"LOF Model → MSE: {mse:.4f}, R²: {r2:.4f}, Approx. Accuracy: {accuracy:.2f}%")
+
+
+        # Save anomaly results
+        errors_df = pd.DataFrame({
+            "Index": np.arange(len(df_clean)),
+            "Anomaly": (y_pred == -1).astype(int)
+        })
+        errors_df.to_csv(OUTPUT_DIR / f"{file.stem}_LOF_anomaly_results.csv", index=False)
+        print(f"Anomaly results saved → {file.stem}_LOF_anomaly_results.csv")
+
     except Exception as e:
         print(f"❌ Error processing {file.name}: {e}")
 
-print()
-
-history = autoencoder.fit(X_scaled, X_scaled, epochs=50, batch_size=32, validation_split=0.1, verbose=0)
-print(f"Final training loss: {history.history['loss'][-1]:.4f}")
-print(f"Final validation loss: {history.history['val_loss'][-1]:.4f}")
-
-reconstructions = autoencoder.predict(X_scaled)
-
-# Compute reconstruction error (MSE)
-mse = mean_squared_error(X_scaled, reconstructions)
-print(f"Reconstruction MSE: {mse:.4f}")
-
-# Optionally compute R² score (like a regression accuracy)
-r2 = r2_score(X_scaled, reconstructions)
-print(f"Reconstruction R² Score: {r2:.4f}")
-
-# You can also compute reconstruction "accuracy" as similarity %
-accuracy = 100 * (1 - mse)
-print(f"Reconstruction Accuracy (approx): {accuracy:.2f}%")
-
-mse_per_row = np.mean(np.square(X_scaled - reconstructions), axis=1)
-
-# Put errors in a DataFrame
-errors_df = pd.DataFrame({
-    "ReconstructionError": mse_per_row
-})
-
-# Set anomaly threshold (95th percentile is common)
-threshold = np.percentile(mse_per_row, 95)
-print(f"Anomaly Detection Threshold (95th percentile): {threshold:.6f}")
-
-# Label anomalies
-errors_df["Anomaly"] = errors_df["ReconstructionError"] > threshold
-
-# Count anomalies
-num_anomalies = errors_df["Anomaly"].sum()
-print(f"Detected {num_anomalies} anomalies out of {len(errors_df)} rows")
-
-# Optional: Save anomaly results
-errors_df.to_csv(OUTPUT_DIR / "../anomaly_detection_results.csv", index=False)
-print("Anomaly detection results saved → anomaly_detection_results.csv")
+# Overall accuracy across all datasets
+if accuracy_list:
+    overall_accuracy = np.mean(accuracy_list)
+    print(f"\n📊 Overall LOF Accuracy across all datasets: {overall_accuracy:.2f}%")

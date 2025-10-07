@@ -1,0 +1,2 @@
+Autoencoder_Anomalies,IsolationForest_Anomalies,OneClassSVM_Anomalies,LOF_Anomalies,IsolationForest_Agreement,OneClassSVM_Agreement,LOF_Agreement,Autoencoder_Accuracy
+27,27,35,27,90.83969465648855,90.07633587786259,90.83969465648855,99.81062657381716
