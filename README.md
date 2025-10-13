@@ -1,6 +1,9 @@
 Synopsis: https://1drv.ms/w/c/0c4b1487469d4d26/EV8VT-6lmfFFgMn1XWQ9LMEBnwu5LjH73wRAK4kfeOyTOw?e=CzkIwY
 
-Reviews of Papers: https://1drv.ms/x/c/0c4b1487469d4d26/EfX9_MLUjDxIsO1pw_LwV-UBZ3Ip-eRrJWvlFhACHn2RSA?e=bIy32O
+Reviews of Papers: https://docs.google.com/spreadsheets/d/1ntEAjVifIwPBdpio3yeSdvexease4ttHytUFHvsWoQI/edit?usp=sharing
+
+Dataset Analysis: https://docs.google.com/document/d/1EidEZMHIYzy6WVwfXCsuii5uQ4RSLNByVSNBHaVw79k/edit?usp=sharing
+
 
 Wearables Dataset
 This folder contains the data file “StresSense.csv”.
