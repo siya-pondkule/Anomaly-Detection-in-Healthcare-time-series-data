@@ -1,3 +1,16 @@
+#Learn the normal physiological patterns of ICU vital signs,
+#and then detect anomalies (unusual readings) based on how poorly they can be reconstructed.
+
+#The model learns “what normal looks like.”
+#Anything that doesn’t look normal produces high reconstruction error and flagged as anomaly.
+
+# working of model
+
+#The encoder learns to compress the data (understand normal patterns).
+#The decoder learns to recreate the data from that compressed form.
+#When something is unusual or abnormal, the model can’t rebuild it accurately, so the difference (called reconstruction error) becomes large — that’s how an anomaly is detected.
+
+
 import pandas as pd
 import numpy as np
 from pathlib import Path

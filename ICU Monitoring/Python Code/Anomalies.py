@@ -1,3 +1,5 @@
+#It detects abnormal readings (like high heart rate or low oxygen saturation), saves the results, and generates graphs for visual analysis.
+
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
