@@ -9,7 +9,7 @@ from pathlib import Path
 # Paths & Config
 # ======================
 DATASETS_DIR = Path(r"d:\Anomaly Detection\ICU Monitoring\Datasets")
-OUTPUT_DIR = DATASETS_DIR / "../AnomalyResults"
+OUTPUT_DIR = DATASETS_DIR / "../Results of all Models/AnomalyResults"
 OUTPUT_DIR.mkdir(exist_ok=True)
 
 # ======================

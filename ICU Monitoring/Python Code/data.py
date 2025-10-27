@@ -52,6 +52,7 @@ else:
                     df = df.dropna(subset=[datetime_cols[0]])
                     df = df.sort_values(by=datetime_cols[0])
 
+
                     # Plot all numeric columns vs datetime
                     plt.figure(figsize=(10, 5))
                     for col in numeric_cols:

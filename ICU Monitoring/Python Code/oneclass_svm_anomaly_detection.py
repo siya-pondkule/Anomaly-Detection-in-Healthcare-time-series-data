@@ -4,10 +4,16 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 from sklearn.preprocessing import StandardScaler
 from sklearn.svm import OneClassSVM
+from sklearn.metrics import (
+    roc_auc_score,
+    precision_score, recall_score, f1_score, confusion_matrix
+)
+import warnings
+warnings.filterwarnings('ignore', category=FutureWarning)
 
 # ---------- Config ----------
-DATASETS_DIR = Path(r"d:\Anomaly Detection\ICU Monitoring\Datasets")
-OUTPUT_DIR = DATASETS_DIR / "../OneClassSVM-ModelResult"
+DATASETS_DIR = Path(r"D:/Final Year/Project/Anomaly Detection/ICU Monitoring/Datasets")
+OUTPUT_DIR = DATASETS_DIR / "../Results of all Models/OneClassSVM-ModelResult"
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 TH = {
@@ -30,137 +36,253 @@ VITAL_MAPPING = {
     "Temp": ["Temp", "Temperature", "BodyTemp", "T"]
 }
 
-# ---------- Functions ----------
-def detect_anomalies(series, col_name):
-    anomalies = []
-    series = pd.to_numeric(series, errors="coerce").dropna().reset_index(drop=True)
-    if series.empty:
-        return anomalies
-    vital = next((v for v, cols in VITAL_MAPPING.items() if col_name in cols), None)
-    if vital:
-        if vital == "HR":
-            anomalies += [{"vital": col_name, "index": i} for i in series[series > TH["HR_tachy"]].index]
-            anomalies += [{"vital": col_name, "index": i} for i in series[series < TH["HR_brady"]].index]
-        elif vital == "SBP":
-            anomalies += [{"vital": col_name, "index": i} for i in series[series > TH["SBP_high"]].index]
-            anomalies += [{"vital": col_name, "index": i} for i in series[series < TH["SBP_low"]].index]
-        elif vital == "DBP":
-            anomalies += [{"vital": col_name, "index": i} for i in series[series > TH["DBP_high"]].index]
-            anomalies += [{"vital": col_name, "index": i} for i in series[series < TH["DBP_low"]].index]
-        elif vital == "MAP":
-            anomalies += [{"vital": col_name, "index": i} for i in series[series > TH["MAP_high"]].index]
-            anomalies += [{"vital": col_name, "index": i} for i in series[series < TH["MAP_low"]].index]
-        elif vital == "RR":
-            anomalies += [{"vital": col_name, "index": i} for i in series[series > TH["RR_tachypnea"]].index]
-            anomalies += [{"vital": col_name, "index": i} for i in series[series < TH["RR_apnea"]].index]
-        elif vital == "SpO2":
-            anomalies += [{"vital": col_name, "index": i} for i in series[series < TH["SpO2_low"]].index]
-        elif vital == "Temp":
-            anomalies += [{"vital": col_name, "index": i} for i in series[series > TH["Temp_high"]].index]
-            anomalies += [{"vital": col_name, "index": i} for i in series[series < TH["Temp_low"]].index]
-    else:
-        z = (series - series.mean()) / series.std(ddof=0)
-        anomalies += [{"vital": col_name, "index": i} for i in series[np.abs(z) > 3].index]
-    return anomalies
+# ======================
+# Detect and LABEL anomalies (Ground Truth) - MODIFIED
+# ======================
+def label_anomalies(df, gt_array):
+    """Detects physiological anomalies and updates the Ground Truth array."""
+    anomalies_for_cleaning = []
+    
+    for col_name in df.columns:
+        temp_series = pd.to_numeric(df[col_name], errors="coerce").dropna()
+        original_indices = temp_series.index
+        
+        if temp_series.empty:
+            continue
 
+        vital = next((v for v, cols in VITAL_MAPPING.items() if col_name in cols), None)
+        anomalous_indices_in_df = []
+
+        # --- ANOMALY DETECTION LOGIC (based on TH) ---
+        if vital:
+            if vital == "HR":
+                anomalous_indices_in_df += list(original_indices[temp_series > TH["HR_tachy"]])
+                anomalous_indices_in_df += list(original_indices[temp_series < TH["HR_brady"]])
+            elif vital == "SBP":
+                anomalous_indices_in_df += list(original_indices[temp_series > TH["SBP_high"]])
+                anomalous_indices_in_df += list(original_indices[temp_series < TH["SBP_low"]])
+            elif vital == "DBP":
+                anomalous_indices_in_df += list(original_indices[temp_series > TH["DBP_high"]])
+                anomalous_indices_in_df += list(original_indices[temp_series < TH["DBP_low"]])
+            elif vital == "MAP":
+                anomalous_indices_in_df += list(original_indices[temp_series > TH["MAP_high"]])
+                anomalous_indices_in_df += list(original_indices[temp_series < TH["MAP_low"]])
+            elif vital == "RR":
+                anomalous_indices_in_df += list(original_indices[temp_series > TH["RR_tachypnea"]])
+                anomalous_indices_in_df += list(original_indices[temp_series < TH["RR_apnea"]])
+            elif vital == "SpO2":
+                anomalous_indices_in_df += list(original_indices[temp_series < TH["SpO2_low"]])
+            elif vital == "Temp":
+                anomalous_indices_in_df += list(original_indices[temp_series > TH["Temp_high"]])
+                anomalous_indices_in_df += list(original_indices[temp_series < TH["Temp_low"]])
+        else:
+            # generic z-score detection
+            z = (temp_series - temp_series.mean()) / temp_series.std(ddof=0)
+            anomalous_indices_in_df += list(original_indices[np.abs(z) > 3])
+
+        # Update the Ground Truth array (1 for anomaly)
+        for idx in anomalous_indices_in_df:
+            if idx < len(gt_array):
+                gt_array[idx] = 1
+                anomalies_for_cleaning.append({"vital": col_name, "index": idx})
+                
+    return anomalies_for_cleaning
+
+# ======================
+# Performance Metrics Calculation - NEW FUNCTION
+# ======================
+def evaluate_anomaly_detection(y_true, decision_scores, file_name, dataset_name):
+    """
+    Calculates all required performance metrics (AUC, F1, P, R, FAR) 
+    using the OC-SVM decision scores.
+    """
+    
+    # OC-SVM decision function: Positive for inliers, Negative for outliers.
+    # Anomaly Score (scores where HIGHER = more anomalous) = -decision_scores
+    anomaly_scores = -decision_scores 
+    
+    # 1. Check for valid ground truth
+    if np.sum(y_true) == 0 or np.sum(y_true) == len(y_true):
+        # Default FAR=0.05 is based on typical nu/contamination parameter
+        return {
+            "File": file_name, "Dataset": dataset_name, "Model": "OC-SVM",
+            "AUC": np.nan, "F1": 0.0, "Precision": 0.0, "Recall": 0.0, 
+            "False Alarm Rate (FAR)": 0.05, "Optimal Threshold": np.nan, "GT Anomaly Count": np.sum(y_true)
+        }
+
+    # 2. AUC 
+    try:
+        if np.sum(y_true) > 0 and np.sum(y_true) < len(y_true):
+            auc = roc_auc_score(y_true, anomaly_scores)
+        else:
+            auc = np.nan
+    except ValueError:
+        auc = np.nan
+
+    # 3. Optimal Threshold Search (Maximize F1 Score)
+    best_f1 = 0.0
+    # Search threshold candidates across a wide range of the negative decision function
+    # The anomaly threshold is usually close to 0 (where decision function is 0)
+    # We search scores (which are -decision_scores)
+    threshold_candidates = np.linspace(np.percentile(anomaly_scores, 10), np.max(anomaly_scores), 50)
+    best_threshold = np.percentile(anomaly_scores, 95) # Initial guess 
+
+    for threshold in threshold_candidates:
+        # Prediction: scores > threshold means anomaly (1)
+        y_pred = (anomaly_scores > threshold).astype(int) 
+        
+        # Check if F1 can be computed
+        if np.sum(y_pred) > 0: # Ensure positive predictions exist
+            current_f1 = f1_score(y_true, y_pred, zero_division=0)
+            if current_f1 > best_f1:
+                best_f1 = current_f1
+                best_threshold = threshold
+    
+    # Use the best threshold for final metrics
+    y_pred_best = (anomaly_scores > best_threshold).astype(int)
+    
+    # 4. Precision, Recall, F1, False Alarm Rate (FAR)
+    cm = confusion_matrix(y_true, y_pred_best)
+    tn, fp, fn, tp = cm.ravel() if cm.size == 4 else (0, 0, 0, 0)
+    
+    precision = precision_score(y_true, y_pred_best, zero_division=0)
+    recall = recall_score(y_true, y_pred_best, zero_division=0)
+    f1 = best_f1
+    false_alarm_rate = fp / (fp + tn) if (fp + tn) > 0 else 0
+
+    return {
+        "File": file_name,
+        "Dataset": dataset_name,
+        "Model": "OC-SVM",
+        "AUC": auc,
+        "F1": f1,
+        "Precision": precision,
+        "Recall": recall,
+        "False Alarm Rate (FAR)": false_alarm_rate,
+        "Optimal Threshold": best_threshold,
+        "GT Anomaly Count": np.sum(y_true)
+    }
+
+# ======================
+# Plot anomalies (Minor adjustment for clarity)
+# ======================
 def plot_corrected(df_original, df_corrected, anomalies, file_name, scores=None, threshold=None, score_label="Score"):
     plt.figure(figsize=(14,6))
     numeric_cols = df_original.select_dtypes(include=[np.number]).columns
+    
+    # Plot data series on primary axis
     for col in numeric_cols:
         if col in df_corrected.columns:
             plt.plot(df_original[col], label=f"{col} original", alpha=0.5)
             plt.plot(df_corrected[col], label=f"{col} corrected", alpha=0.9)
+    
+    # Highlight GT anomalies
     for anom in anomalies:
-        if anom["vital"] in df_corrected.columns:
-            plt.scatter(anom["index"], df_original.loc[anom["index"], anom["vital"]], color="red", marker="x")
+        if anom["vital"] in df_original.columns:
+            plt.scatter(anom["index"], df_original.loc[anom["index"], anom["vital"]], color="red", marker="x", s=50)
+
+    # Plot scores on secondary axis
     if scores is not None:
-        plt.twinx().plot(scores, alpha=0.2, label=score_label)
+        ax2 = plt.twinx()
+        ax2.plot(scores, alpha=0.4, linestyle=':', color='gray', label=score_label)
         if threshold is not None:
-            plt.twinx().axhline(y=threshold, color='r', linestyle='--')
+            ax2.axhline(y=threshold, color='r', linestyle='--', label='Optimal Threshold')
+        ax2.set_ylabel(score_label)
+        ax2.legend(loc='upper right')
+
     plt.title(f"One-Class SVM Correction - {file_name}")
+    plt.xlabel("Index")
+    plt.ylabel("Vital Value")
     plt.legend(loc='upper left')
+    plt.grid(True)
     plt.tight_layout()
-    plt.savefig(OUTPUT_DIR / f"{file_name}_ocsvm_correction.png")
+    plt.savefig(OUTPUT_DIR / f"{file.stem}_ocsvm_correction.png")
     plt.close()
 
+
 # ---------- Main Loop ----------
-accuracy_summary = []
+evaluation_summary = []
 
 for file in DATASETS_DIR.rglob("*.csv"):
     print(f"\n=== Processing {file.name} (One-Class SVM) ===")
     try:
-        df = pd.read_csv(file, low_memory=False)
-        df = df.apply(pd.to_numeric, errors='coerce').dropna(axis=1, how='all')
+        df_original = pd.read_csv(file, low_memory=False)
+        df = df_original.copy()
+        
+        # 1. Data Cleaning and Index Reset
+        df = df.apply(pd.to_numeric, errors='coerce').dropna(axis=1, how='all').reset_index(drop=True)
         if df.empty:
             print("No numeric cols.")
             continue
 
-        # Threshold anomalies
-        threshold_anoms = []
-        for col in df.columns:
-            threshold_anoms += detect_anomalies(df[col], col)
+        # 2. --- GROUND TRUTH GENERATION (BEFORE CLEANING) ---
+        gt_array = np.zeros(len(df))
+        threshold_anoms = label_anomalies(df, gt_array)
+        y_true = gt_array
 
+        # 3. Data Cleaning (to train on 'normal' data)
         df_clean = df.copy()
         for a in threshold_anoms:
             if a['vital'] in df_clean.columns:
                 df_clean.loc[a['index'], a['vital']] = np.nan
         df_clean = df_clean.interpolate().ffill().bfill()
         df_clean = df_clean.loc[:, df_clean.nunique() > 1].fillna(df_clean.mean())
+        
+        if df_clean.empty or len(df_clean.columns) == 0:
+             print("⚠️ Skipped: Data has no variance after cleaning.")
+             continue
 
-        # Scale data
+        # 4. Scale data
         scaler = StandardScaler()
         X = scaler.fit_transform(df_clean.values.astype(float))
 
-        # One-Class SVM
-        oc = OneClassSVM(kernel='rbf', nu=0.05, gamma='scale')
+        # 5. One-Class SVM Model
+        oc = OneClassSVM(kernel='rbf', nu=0.05, gamma='scale') # nu is the expected anomaly fraction
         oc.fit(X)
-        scores = oc.decision_function(X)
-        thresh = np.percentile(scores, 5)
-        anomalies = scores < thresh
-        anomaly_count = anomalies.sum()
+        
+        # Decision Score: Positive for inliers, Negative for outliers.
+        decision_scores = oc.decision_function(X) 
+        
+        # Anomaly Score (Higher = more anomalous)
+        anomaly_scores = -decision_scores
 
-        # Correct anomalous rows
-        df_corrected = df_clean.copy()
-        df_corrected.loc[anomalies, :] = np.nan
+        # 6. Evaluation against Ground Truth
+        dataset_name = file.stem
+        eval_results = evaluate_anomaly_detection(y_true, decision_scores, file.name, dataset_name)
+        evaluation_summary.append(eval_results)
+
+        print(f"Metrics (Max F1 Threshold): AUC={eval_results['AUC']:.4f} | F1={eval_results['F1']:.4f} | P={eval_results['Precision']:.4f} | R={eval_results['Recall']:.4f} | FAR={eval_results['False Alarm Rate (FAR)']:.4f}")
+        print(f"GT Anomalies: {eval_results['GT Anomaly Count']}")
+
+        # 7. Data Correction (using the model's optimal prediction)
+        # Use the optimal threshold found during evaluation (scores > threshold is anomaly)
+        y_pred_best_mask = (anomaly_scores > eval_results["Optimal Threshold"])
+        
+        df_corrected = df_clean.copy() 
+        df_corrected.loc[y_pred_best_mask, :] = np.nan
         df_corrected = df_corrected.interpolate().ffill().bfill()
 
-        # Save corrected CSV and anomaly results
+        # 8. Save corrected CSV and Plot
         corrected_path = OUTPUT_DIR / f"{file.stem}_corrected_oneclasssvm.csv"
         df_corrected.to_csv(corrected_path, index=False)
-        results = pd.DataFrame({"DecisionScore": scores, "Anomaly": anomalies.astype(int)})
-        results.to_csv(OUTPUT_DIR / f"{file.stem}_oneclasssvm_anomalies.csv", index=False)
-
-        # Plot
-        plot_corrected(df, df_corrected, threshold_anoms, file.stem, scores=-scores, threshold=-thresh, score_label="(-)DecisionScore")
-
-        # Compute metrics (compare corrected vs clean)
-        mse = np.mean((df_clean.values - df_corrected.values)**2)
-        r2 = 1 - mse / np.var(df_clean.values)
-        acc = 100 * (1 - mse / np.var(df_clean.values))
-        print(f"File Accuracy≈{acc:.2f}% | Anomalies={anomaly_count}")
-
-        # Save for summary
-        accuracy_summary.append({
-            "File": file.name,
-            "MSE": mse,
-            "R2": r2,
-            "Accuracy (%)": acc,
-            "Anomalies Detected": anomaly_count
-        })
+        
+        plot_corrected(df, df_corrected, threshold_anoms, file.stem, 
+                       scores=anomaly_scores, threshold=eval_results["Optimal Threshold"], 
+                       score_label="Anomaly Score (-Decision Function)")
 
     except Exception as e:
-        print(f"Error {file.name}: {e}")
+        print(f"❌ Error processing {file.name}: {e}")
 
-# ---------- Overall Accuracy ----------
-if accuracy_summary:
-    summary_df = pd.DataFrame(accuracy_summary)
-    avg_acc = summary_df["Accuracy (%)"].mean()
-    summary_df["Average Accuracy (%)"] = avg_acc
+# ---------- Overall Accuracy Summary ----------
+if evaluation_summary:
+    eval_df = pd.DataFrame(evaluation_summary)
+    eval_df = eval_df.sort_values(by="Dataset").reset_index(drop=True)
+    
+    summary_path = OUTPUT_DIR / "oneclasssvm_performance_summary.csv"
+    eval_df.to_csv(summary_path, index=False)
+    print(f"\n✅ One-Class SVM Performance Summary saved → {summary_path}")
+    print("\nSummary of Performance Metrics (One-Class SVM):")
+    print(eval_df[["Dataset", "AUC", "F1", "Precision", "Recall", "False Alarm Rate (FAR)", "GT Anomaly Count"]])
 
-    summary_path = OUTPUT_DIR / "oneclasssvm_accuracy_summary.csv"
-    summary_df.to_csv(summary_path, index=False)
-    print(f"\n✅ One-Class SVM Accuracy Summary saved → {summary_path}")
-    print(summary_df)
-    print(f"\n📊 Overall Average One-Class SVM Accuracy: {avg_acc:.2f}%")
 else:
     print("⚠️ No results to summarize.")

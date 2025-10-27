@@ -11,7 +11,7 @@ from sklearn.metrics import mean_squared_error, r2_score
 # Paths & Config
 # ======================
 DATASETS_DIR = Path(r"d:\Anomaly Detection\ICU Monitoring\Datasets")
-OUTPUT_DIR = DATASETS_DIR / "../ModelResults"
+OUTPUT_DIR = DATASETS_DIR / "../Results of all Models/ModelResults"
 OUTPUT_DIR.mkdir(exist_ok=True)
 
 # ======================
