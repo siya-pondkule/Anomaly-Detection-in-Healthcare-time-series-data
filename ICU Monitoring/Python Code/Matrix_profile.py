@@ -206,7 +206,7 @@ def plot_matrix_profile_error(anomaly_scores, optimal_threshold, file_stem):
     plot_path = OUTPUT_DIR / f"{file_stem}_mp_error_plot.png"
     plt.savefig(plot_path)
     plt.close()
-    print(f"✅ Plot saved to {plot_path}")
+    print(f"Plot saved to {plot_path}")
 
 
 # ======================
@@ -263,7 +263,7 @@ for file in DATASETS_DIR.rglob("*.csv"):
         plot_matrix_profile_error(anomaly_scores, eval_results['Optimal Threshold'], file.stem)
 
     except Exception as e:
-        print(f"❌ CRITICAL ERROR processing {file.name}: {e}")
+        print(f"CRITICAL ERROR processing {file.name}: {e}")
 
 
 # ======================
@@ -280,4 +280,4 @@ if evaluation_summary:
     print(eval_df[["Dataset", "AUC", "F1", "Precision", "Recall", "False Alarm Rate (FAR)", "GT Anomaly Count"]])
 
 else:
-    print("⚠️ No results to summarize.")
+    print("No results to summarize.")
