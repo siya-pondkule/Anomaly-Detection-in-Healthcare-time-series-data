@@ -93,6 +93,8 @@ def label_anomalies(series, col_name, gt_array, index_offset):
     anomalies_list = [{"vital": col_name, "index": i} for i in anomalous_indices]
     return anomalies_list
 
+
+
 # ======================
 # Performance Metrics Calculation
 # ======================

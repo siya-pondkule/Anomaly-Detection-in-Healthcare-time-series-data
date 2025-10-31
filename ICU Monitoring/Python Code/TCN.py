@@ -305,9 +305,9 @@ if evaluation_summary:
     
     summary_path = OUTPUT_DIR / "tcn_ae_performance_summary.csv"
     eval_df.to_csv(summary_path, index=False)
-    print(f"\n✅ TCN-AE Performance Summary saved → {summary_path}")
+    print(f"\nTCN-AE Performance Summary saved → {summary_path}")
     print("\nSummary of Performance Metrics (TCN Autoencoder):")
     print(eval_df[["Dataset", "AUC", "F1", "Precision", "Recall", "False Alarm Rate (FAR)", "GT Anomaly Count"]])
 
 else:
-    print("⚠️ No results generated to summarize.")
+    print("No results generated to summarize.")

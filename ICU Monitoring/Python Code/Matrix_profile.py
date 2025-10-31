@@ -275,7 +275,7 @@ if evaluation_summary:
     
     summary_path = OUTPUT_DIR / "matrixprofile_performance_summary.csv"
     eval_df.to_csv(summary_path, index=False)
-    print(f"\n✅ Matrix Profile Performance Summary saved → {summary_path}")
+    print(f"\n Matrix Profile Performance Summary saved → {summary_path}")
     print("\nSummary of Performance Metrics (Matrix Profile):")
     print(eval_df[["Dataset", "AUC", "F1", "Precision", "Recall", "False Alarm Rate (FAR)", "GT Anomaly Count"]])
 

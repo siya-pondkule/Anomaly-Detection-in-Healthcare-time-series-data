@@ -26,6 +26,7 @@ TH = {
     "Temp_high": 38.5, "Temp_low": 35.0
 }
 
+
 VITAL_MAPPING = {
     "HR": ["Pulse", "HeartRate", "HR", "PR"],
     "SBP": ["SysBP", "SBP", "SystolicBP", "SYS"],

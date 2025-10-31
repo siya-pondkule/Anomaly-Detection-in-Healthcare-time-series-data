@@ -118,7 +118,7 @@ for file in DATASETS_DIR.rglob("*.csv"):
         # Drop columns with all NaNs
         df = df.dropna(axis=1, how='all')
         if df.empty:
-            print("⚠️ No valid numeric data found.")
+            print("No valid numeric data found.")
             continue
 
         # Detect anomalies
@@ -164,7 +164,7 @@ for file in DATASETS_DIR.rglob("*.csv"):
         # Save corrected CSV
         corrected_path = OUTPUT_DIR / f"{file.stem}_corrected.csv"
         df_corrected.to_csv(corrected_path, index=False)
-        print(f"✅ Corrected data saved → {corrected_path}")
+        print(f"Corrected data saved → {corrected_path}")
         print(f"Detected {len(anomalies)} anomalies, corrected using Autoencoder.")
 
         # Plot before/after

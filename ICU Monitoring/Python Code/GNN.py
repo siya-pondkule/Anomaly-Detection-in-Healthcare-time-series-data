@@ -241,6 +241,8 @@ for file in DATASETS_DIR.rglob("*.csv"):
         gt_array_full = np.zeros(len(df))
         threshold_anoms = label_anomalies(df, gt_array_full)
         
+        
+        
         # 3. Data Cleaning (for training)
         df_clean = df.copy()
         for a in threshold_anoms:
