@@ -12,7 +12,6 @@ from sklearn.metrics import (
 # ======================
 # Paths
 # ======================
-# NOTE: The provided path is specific to your local machine. 
 DATASETS_DIR = Path(r"D:/Final Year/Project/Anomaly Detection/ICU Monitoring/Datasets")
 #DATASETS_DIR = Path("./dummy_data_dir")
 DATASETS_DIR.mkdir(exist_ok=True, parents=True)
