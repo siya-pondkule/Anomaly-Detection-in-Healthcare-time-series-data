@@ -1,0 +1,2 @@
+total_sequences,detected_anomalies,anomaly_percentage,window_size,threshold_95pct
+76055,3803,5.000328709486555,20,0.5354549702962265

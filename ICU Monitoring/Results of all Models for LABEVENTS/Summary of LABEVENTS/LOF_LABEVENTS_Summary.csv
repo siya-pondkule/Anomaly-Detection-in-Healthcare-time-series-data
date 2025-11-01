@@ -1,0 +1,2 @@
+total_records,detected_anomalies,anomaly_percentage,lof_threshold_95pct,n_neighbors,contamination
+54485,2725,5.001,3.693478239750182,25,0.05
