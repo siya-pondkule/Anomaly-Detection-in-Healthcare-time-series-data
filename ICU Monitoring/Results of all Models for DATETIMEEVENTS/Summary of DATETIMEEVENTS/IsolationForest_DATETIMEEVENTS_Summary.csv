@@ -1,0 +1,2 @@
+Total Records,Detected Anomalies,Anomaly Percentage (%),Features Used
+71,4,5.63,"['subject_id', 'event_count', 'avg_time_gap_min']"

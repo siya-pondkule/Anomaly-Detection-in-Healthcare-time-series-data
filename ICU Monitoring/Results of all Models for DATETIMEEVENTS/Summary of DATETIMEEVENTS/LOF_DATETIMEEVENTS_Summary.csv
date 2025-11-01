@@ -1,0 +1,2 @@
+Total Records,Detected Anomalies,Anomaly %,Used Features,Contamination,Neighbors
+15551,778,5.0,"row_id, subject_id, hadm_id, icustay_id, itemid, cgid, time_diff_min",0.05,20
