@@ -1,0 +1,5 @@
+=== LOF Anomaly Detection Summary ===
+Total samples: 200
+Detected anomalies: 10
+Normal points: 190
+Contamination: 5%

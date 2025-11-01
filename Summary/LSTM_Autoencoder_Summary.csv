@@ -1,0 +1,5 @@
+=== LSTM Autoencoder Anomaly Detection Summary ===
+Total sequences: 190
+Detected anomalies: 1
+Normal sequences: 189
+Threshold (MSE): 1.379050

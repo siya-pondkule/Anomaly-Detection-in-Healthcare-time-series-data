@@ -1,0 +1,6 @@
+=== One-Class SVM Anomaly Detection Summary ===
+Total samples: 200
+Detected anomalies: 14
+Normal points: 186
+Features used: ['Age', 'SysBP', 'Pulse']
+Kernel: RBF | nu=0.05 | gamma='scale'

@@ -1,0 +1,6 @@
+=== TCN Autoencoder Anomaly Detection Summary ===
+Total samples: 200
+Detected anomalies: 3
+Normal points: 197
+Features used: ['Age', 'SysBP', 'Pulse']
+Reconstruction error threshold: 0.047063

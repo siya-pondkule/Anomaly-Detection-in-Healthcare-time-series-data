@@ -1,0 +1,6 @@
+=== Transformer Autoencoder Anomaly Detection Summary ===
+Total samples: 200
+Detected anomalies: 7
+Normal points: 193
+Features used: ['Age', 'SysBP', 'Pulse']
+Reconstruction error threshold: 1.526252

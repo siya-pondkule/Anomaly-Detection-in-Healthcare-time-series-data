@@ -1,0 +1,5 @@
+=== Matrix Profile Anomaly Detection Summary ===
+Feature analyzed: SysBP
+Window size: 20
+Total data points: 200
+Detected anomalies (top 5 discords): [116, 48, 45, 118, 115]
