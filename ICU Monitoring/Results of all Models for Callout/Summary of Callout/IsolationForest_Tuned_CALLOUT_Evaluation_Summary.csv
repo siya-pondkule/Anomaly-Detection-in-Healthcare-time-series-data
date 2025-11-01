@@ -1,0 +1,2 @@
+Model,AUC,F1,Precision,Recall,FAR,Threshold
+IsolationForest_Tuned,0.39201877934272306,0.0,0.0,0.0,0.09859154929577464,-0.0381973361049815
