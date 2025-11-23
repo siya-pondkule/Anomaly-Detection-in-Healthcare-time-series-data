@@ -1,0 +1,10 @@
+=== One-Class SVM Anomaly Detection Summary ===
+Total samples: 200
+Detected anomalies: 14
+
+--- Evaluation Metrics ---
+AUC Score: 0.5152
+Precision: 0.9286
+Recall: 0.0956
+F1-score: 0.1733
+FAR (False Alarm Rate): 0.0156

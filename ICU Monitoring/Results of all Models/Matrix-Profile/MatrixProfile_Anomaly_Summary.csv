@@ -1,0 +1,2 @@
+Feature,AUC_scores_based,Best_Threshold,F1_scores_based,Precision_scores_based,Recall_scores_based,FAR_scores_based,AUC_topk_discords,F1_topk_discords,Precision_topk_discords,Recall_topk_discords,FAR_topk_discords,Notes
+SysBP (matrix profile),0.46993491794001135,4.358906736531029,0.15384615384615385,0.5789473684210527,0.08870967741935484,0.14035087719298245,0.46993491794001135,0.38823529411764707,0.717391304347826,0.2661290322580645,0.22807017543859648,"window_size=20, top_5_discords"

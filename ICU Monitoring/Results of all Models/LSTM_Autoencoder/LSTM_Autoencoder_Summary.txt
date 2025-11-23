@@ -1,0 +1,9 @@
+=== LSTM Autoencoder Anomaly Detection Summary ===
+AUC Score: 1.0000
+F1 Score: 1.0000
+Precision: 1.0000
+Recall: 1.0000
+False Alarm Rate (FAR): 0.0000
+Threshold Used (MSE): 1.234254
+Total Sequences: 190
+Detected Anomalies: 10

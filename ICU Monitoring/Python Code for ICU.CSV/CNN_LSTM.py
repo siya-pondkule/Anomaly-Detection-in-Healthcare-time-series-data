@@ -11,10 +11,12 @@ from tensorflow.keras import layers, models
 # ======================
 DATA_PATH = Path(r"D:\Final Year\Project\Anomaly Detection\Anomaly Detection\ICU Monitoring\ICU Datasets\ICU.csv")
 OUTPUT_DIR = Path(r"D:\Final Year\Project\Anomaly Detection\Anomaly Detection\ICU Monitoring\Results of all Models\CNN-LSTM-ModelResults")
+SUMMARY_PATH = OUTPUT_DIR / "CNNLSTM_Anomaly_Summary.csv"
+
 OUTPUT_DIR.mkdir(exist_ok=True, parents=True)
 
 # ======================
-# Thresholds for physiological labeling
+# Thresholds (for physiological GT labels)
 # ======================
 THRESHOLDS = {
     "HR_tachy": 100, "HR_brady": 60,
@@ -33,6 +35,7 @@ def label_anomalies(series, col_name, gt_array, index_offset):
     series = pd.to_numeric(series, errors="coerce").dropna().reset_index(drop=True)
     if series.empty:
         return []
+
     vital = next((v for v, cols in VITAL_MAPPING.items() if col_name in cols), None)
     anomalous_indices = []
 
@@ -59,7 +62,7 @@ def create_sequences(X, seq_length=10):
     return np.array(sequences)
 
 # ======================
-# ✅ Fixed CNN-LSTM Autoencoder (keeps same seq length)
+# CNN-LSTM Autoencoder
 # ======================
 def build_cnn_lstm_autoencoder(seq_length, n_features):
     model = models.Sequential([
@@ -107,9 +110,10 @@ def evaluate_anomaly_detection(y_true, mse_scores):
     }
 
 # ======================
-# Main
+# Main Process
 # ======================
 print(f"\n=== Training CNN-LSTM model on {DATA_PATH.name} ===")
+
 df = pd.read_csv(DATA_PATH)
 df = df[["SysBP", "Pulse"]].dropna().reset_index(drop=True)
 
@@ -131,6 +135,7 @@ y_test = y_seq[train_size:]
 
 model = build_cnn_lstm_autoencoder(SEQ_LEN, X_scaled.shape[1])
 history = model.fit(X_train, X_train, epochs=50, batch_size=32, validation_split=0.1, verbose=0)
+
 print(f"Training complete | Final Loss: {history.history['loss'][-1]:.5f}")
 
 # Reconstruction
@@ -141,29 +146,40 @@ mse_scores = np.mean(np.square(X_test_pred - X_test), axis=(1, 2))
 eval_results = evaluate_anomaly_detection(y_test, mse_scores)
 
 print(f"\nResults for CNN-LSTM:")
-print(f"AUC={eval_results['AUC']:.4f} | F1={eval_results['F1']:.4f} | "
-      f"Precision={eval_results['Precision']:.4f} | Recall={eval_results['Recall']:.4f} | "
-      f"FAR={eval_results['FAR']:.4f}")
+print(f"AUC={eval_results['AUC']:.4f} | F1={eval_results['F1']:.4f} | Precision={eval_results['Precision']:.4f} | Recall={eval_results['Recall']:.4f} | FAR={eval_results['FAR']:.4f}")
 
-# Save anomalies
-anomaly_indices = np.where(mse_scores >= eval_results["Threshold"])[0] + SEQ_LEN + train_size
-summary = pd.DataFrame({
-    "Anomaly Index": anomaly_indices,
-    "Reconstruction Error": mse_scores[anomaly_indices - train_size - SEQ_LEN]
-})
-summary.to_csv(OUTPUT_DIR / "CNNLSTM_Anomaly_Summary.csv", index=False)
-print(f"\n🧾 Summary saved → {OUTPUT_DIR / 'CNNLSTM_Anomaly_Summary.csv'}")
+# ======================
+# SAVE UPDATED SUMMARY CSV (as you requested)
+# ======================
+summary_df = pd.DataFrame([{
+    "AUC": eval_results["AUC"],
+    "F1": eval_results["F1"],
+    "Precision": eval_results["Precision"],
+    "Recall": eval_results["Recall"],
+    "FAR": eval_results["FAR"],
+    "Best_Threshold": eval_results["Threshold"]
+}])
 
+summary_df.to_csv(SUMMARY_PATH, index=False)
+
+print(f"\n🧾 Summary saved → {SUMMARY_PATH}")
+
+# ======================
 # Plot anomalies
+# ======================
+threshold = eval_results["Threshold"]
+anomaly_indices = np.where(mse_scores >= threshold)[0] + SEQ_LEN + train_size
+
 plt.figure(figsize=(12,6))
 plt.plot(df["SysBP"], label="SysBP", alpha=0.7)
 plt.plot(df["Pulse"], label="Pulse", alpha=0.7)
+
 for idx in anomaly_indices:
     if idx < len(df):
         plt.scatter(idx, df.loc[idx, "SysBP"], color="red", marker="x", s=50)
         plt.scatter(idx, df.loc[idx, "Pulse"], color="red", marker="x", s=50)
 
-plt.title("ICU Anomaly Detection using CNN-LSTM (Fixed Sequence Length)")
+plt.title("ICU Anomaly Detection using CNN-LSTM")
 plt.xlabel("Record Index")
 plt.ylabel("Value")
 plt.legend()
