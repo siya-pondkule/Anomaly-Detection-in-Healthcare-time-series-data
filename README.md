@@ -5,3 +5,4 @@ Those folder contians code in various datasets
 uses stressSense.csv in order to train models onto it
 2. PAMAP2 dataset
 3. Mobifall dataset
+4. USC HAD dataset
