@@ -3,8 +3,11 @@ import numpy as np
 import matplotlib.pyplot as plt
 from pathlib import Path
 from sklearn.preprocessing import StandardScaler
+from sklearn.metrics import (
+    roc_auc_score, precision_score, recall_score, f1_score, confusion_matrix
+)
 from tensorflow.keras.models import Sequential
-from tensorflow.keras.layers import LSTM, Conv1D, MaxPooling1D, UpSampling1D, Dense, RepeatVector, TimeDistributed
+from tensorflow.keras.layers import LSTM, Conv1D, MaxPooling1D, RepeatVector, TimeDistributed, Dense
 from tensorflow.keras.callbacks import EarlyStopping
 
 # ====================== PATHS ======================
@@ -24,6 +27,7 @@ try:
     sample.decode(encoding)
 except Exception:
     encoding = "latin1"
+
 print(f"Detected encoding: {encoding}")
 
 with open(DATA_PATH, "r", encoding=encoding, errors="ignore") as f:
@@ -35,32 +39,30 @@ print(f"Detected delimiter: '{best_delim}'")
 
 # ====================== Load Data ======================
 df = pd.read_csv(DATA_PATH, encoding=encoding, delimiter=best_delim, engine="python", on_bad_lines="skip")
-print(f"✅ Loaded data → shape: {df.shape}")
-print(f"Columns: {df.columns.tolist()}")
+print(f"Loaded shape: {df.shape}")
 
 # ====================== Preprocessing ======================
-# Convert timestamps
 for col in df.columns:
     if "time" in col.lower():
         df[col] = pd.to_datetime(df[col], errors="coerce")
 
-# Create time difference feature
 if "subject_id" in df.columns and "charttime" in df.columns:
     df.sort_values(["subject_id", "charttime"], inplace=True)
     df["time_diff_min"] = df.groupby("subject_id")["charttime"].diff().dt.total_seconds() / 60.0
-    df["time_diff_min"] = df["time_diff_min"].fillna(0.0)
+    df["time_diff_min"].fillna(0.0, inplace=True)
 else:
     df["time_diff_min"] = np.arange(len(df)).astype(float)
 
-# Select numeric columns
 numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
 if "time_diff_min" not in numeric_cols:
     numeric_cols.append("time_diff_min")
 
 df_numeric = df[numeric_cols].replace([np.inf, -np.inf], np.nan).dropna(how="any")
+
 if df_numeric.empty:
-    raise ValueError("❌ No valid numeric data for CNN-LSTM training.")
-print(f"🧮 Using numeric columns: {numeric_cols}")
+    raise ValueError("No valid numeric data for CNN-LSTM training.")
+
+print(f"Using numeric columns: {numeric_cols}")
 
 # ====================== Normalize ======================
 scaler = StandardScaler()
@@ -76,24 +78,23 @@ def create_sequences(X, time_steps=TIME_STEPS):
     return np.array(seqs)
 
 X_seq = create_sequences(X_scaled)
-print(f"✅ Created sequences → shape: {X_seq.shape}")
+print(f"Sequence Shape: {X_seq.shape}")
 
-# ====================== Build CNN-LSTM Autoencoder ======================
-# ====================== Build CNN-LSTM Autoencoder ======================
+# ====================== CNN-LSTM Autoencoder ======================
 model = Sequential([
-    Conv1D(filters=64, kernel_size=3, padding='same', activation='relu', input_shape=(X_seq.shape[1], X_seq.shape[2])),
+    Conv1D(filters=64, kernel_size=3, padding='same', activation='relu',
+           input_shape=(X_seq.shape[1], X_seq.shape[2])),
     MaxPooling1D(pool_size=2, padding='same'),
     LSTM(64, activation='relu', return_sequences=False),
-    RepeatVector(X_seq.shape[1]),  # repeats 10 timesteps
+    RepeatVector(X_seq.shape[1]),
     LSTM(64, activation='relu', return_sequences=True),
-    TimeDistributed(Dense(X_seq.shape[2]))  # output shape: (None, 10, features)
+    TimeDistributed(Dense(X_seq.shape[2]))
 ])
 
 model.compile(optimizer='adam', loss='mse')
 model.summary()
 
-
-# ====================== Train Model ======================
+# ====================== Train ======================
 early_stop = EarlyStopping(monitor='loss', patience=3, restore_best_weights=True)
 
 history = model.fit(
@@ -105,41 +106,83 @@ history = model.fit(
     verbose=1
 )
 
-# ====================== Compute Reconstruction Error ======================
+# ====================== Reconstruction Error ======================
 X_pred = model.predict(X_seq)
 recon_error = np.mean(np.square(X_seq - X_pred), axis=(1, 2))
 
-threshold = np.percentile(recon_error, 95)
-anomalies = recon_error > threshold
+# Ground truth (no labels → assume all normal)
+gt = np.zeros(len(recon_error), dtype=int)
 
-print(f"✅ Training complete.")
-print(f"🚨 Detected {anomalies.sum()} anomalies out of {len(anomalies)} sequences.")
+# ====================== MULTI-THRESHOLD EVALUATION ======================
+thresholds = [90, 95, 98]
+eval_rows = []
+best_f1 = -1
+best_row = None
+
+for pct in thresholds:
+    thr = np.percentile(recon_error, pct)
+    y_pred = (recon_error >= thr).astype(int)
+
+    try:
+        auc = roc_auc_score(gt, recon_error)
+    except:
+        auc = np.nan
+
+    precision = precision_score(gt, y_pred, zero_division=0)
+    recall = recall_score(gt, y_pred, zero_division=0)
+    f1 = f1_score(gt, y_pred, zero_division=0)
+
+    cm = confusion_matrix(gt, y_pred)
+    tn, fp, fn, tp = cm.ravel() if cm.size == 4 else (0,0,0,0)
+    far = fp / (fp + tn) if (fp + tn) else 0
+
+    row = {
+        "Threshold_%": pct,
+        "Threshold_Value": thr,
+        "AUC": auc,
+        "Precision": precision,
+        "Recall": recall,
+        "F1": f1,
+        "FAR": far,
+        "TP": tp, "FP": fp, "TN": tn, "FN": fn,
+        "Detected_Anomalies": int(y_pred.sum())
+    }
+    eval_rows.append(row)
+
+    if f1 > best_f1:
+        best_f1 = f1
+        best_row = row.copy()
+
+multi_df = pd.DataFrame(eval_rows)
+multi_df.to_csv(SUMMARY_DIR / "LABEVENTS_CNN_LSTM_MultiThresholdSummary.csv", index=False)
+
+pd.DataFrame([best_row]).to_csv(SUMMARY_DIR / "LABEVENTS_CNN_LSTM_BestThreshold.csv", index=False)
+
+print("\n=== MULTI-THRESHOLD RESULTS ===")
+print(multi_df)
+print("\n=== BEST THRESHOLD ===")
+print(best_row)
+
+# ====================== Use Best Threshold ======================
+best_threshold = best_row["Threshold_Value"]
+final_pred = (recon_error >= best_threshold).astype(int)
+anomaly_idx = np.where(final_pred == 1)[0]
 
 # ====================== Save Results ======================
 results_df = pd.DataFrame({
     "sequence_index": np.arange(len(recon_error)),
     "reconstruction_error": recon_error,
-    "is_anomaly": anomalies.astype(int)
+    "is_anomaly": final_pred
 })
-results_file = OUTPUT_DIR / "LABEVENTS_CNN_LSTM_Results.csv"
-results_df.to_csv(results_file, index=False)
-print(f"✅ Results saved → {results_file}")
-
-summary = {
-    "total_sequences": len(anomalies),
-    "detected_anomalies": int(anomalies.sum()),
-    "anomaly_percentage": round(100.0 * anomalies.sum() / len(anomalies), 3),
-    "threshold": round(threshold, 5)
-}
-pd.DataFrame([summary]).to_csv(SUMMARY_DIR / "CNN_LSTM_LABEVENTS_Summary.csv", index=False)
-print(f"✅ Summary saved → {SUMMARY_DIR / 'CNN_LSTM_LABEVENTS_Summary.csv'}")
+results_df.to_csv(OUTPUT_DIR / "LABEVENTS_CNN_LSTM_Results.csv", index=False)
 
 # ====================== Visualization ======================
 plt.figure(figsize=(12,6))
-plt.title("CNN-LSTM Autoencoder Reconstruction Error - LABEVENTS")
+plt.title("LABEVENTS CNN-LSTM Reconstruction Error")
 plt.plot(recon_error, label="Reconstruction Error", alpha=0.7)
-plt.axhline(threshold, color="red", linestyle="--", label="Anomaly Threshold")
-plt.scatter(np.where(anomalies)[0], recon_error[anomalies], color="red", marker="x", label="Anomalies")
+plt.axhline(best_threshold, color="red", linestyle="--",
+            label=f"Best Threshold ({best_row['Threshold_%']}%)")
+plt.scatter(anomaly_idx, recon_error[anomaly_idx], color="red", marker="x", label="Anomalies")
 plt.xlabel("Sequence Index")
 plt.ylabel("Reconstruction Error")
 plt.legend()
@@ -147,6 +190,7 @@ plt.grid(True)
 plt.tight_layout()
 plt.savefig(OUTPUT_DIR / "LABEVENTS_CNN_LSTM_AnomalyPlot.png")
 plt.close()
-print(f"✅ Plot saved → {OUTPUT_DIR / 'LABEVENTS_CNN_LSTM_AnomalyPlot.png'}")
 
-print("\n🎯 CNN-LSTM Anomaly Detection completed successfully!")
+print("\n🎯 CNN-LSTM LABEVENTS anomaly detection completed successfully!")
+print(f"📌 Multi-threshold summary saved at: {SUMMARY_DIR}")
+print(f"📌 Best threshold summary saved at: {SUMMARY_DIR}")

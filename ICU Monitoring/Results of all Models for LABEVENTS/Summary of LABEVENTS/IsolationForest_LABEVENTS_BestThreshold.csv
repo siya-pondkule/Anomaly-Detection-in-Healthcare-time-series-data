@@ -1,0 +1,2 @@
+Threshold_%,Threshold_Value,AUC,Precision,Recall,F1,FAR,TP,FP,TN,FN,Detected_Anomalies
+95,-3.7752893733834607e-17,1.0,1.0,1.0,1.0,0.0,2725,0,51760,0,2725

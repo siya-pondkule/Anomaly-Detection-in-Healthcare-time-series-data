@@ -115,4 +115,4 @@ plt.tight_layout()
 plt.savefig(OUTPUT_DIR / "ICU_GNN_AnomalyPlot.png")
 plt.close()
 
-print("\n✅ GNN Model training, evaluation, and visualization completed successfully.")
+print("\nGNN Model training, evaluation, and visualization completed successfully.")

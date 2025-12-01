@@ -1,0 +1,2 @@
+Total Records,Detected Anomalies,Anomaly Percentage (%),Input Features,Latent Dimension,Threshold (95th Percentile),AUC,Precision,Recall,F1,FAR
+71,4,5.63,3,2,3.923187,,,,,

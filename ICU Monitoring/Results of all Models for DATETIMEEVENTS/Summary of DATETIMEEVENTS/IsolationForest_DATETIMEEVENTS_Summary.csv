@@ -1,2 +1,2 @@
-Total Records,Detected Anomalies,Anomaly Percentage (%),Features Used
-71,4,5.63,"['subject_id', 'event_count', 'avg_time_gap_min']"
+Total Records,GT_Anomalies_Derived,Chosen_Threshold_Name,Chosen_Threshold_Value,AUC,Precision,Recall,F1,FAR,Predicted_Anomalies_at_Chosen_Threshold,Features_Used
+71,4,95%,-5.551115123125783e-17,0.9962686567164178,0.75,0.75,0.75,0.014925373134328358,4,event_count;avg_time_gap_min

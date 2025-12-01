@@ -1,178 +1,230 @@
-import pandas as pd
+import os
 import numpy as np
+import pandas as pd
 import matplotlib.pyplot as plt
 from pathlib import Path
-import chardet
-from tensorflow.keras.models import Model
-from tensorflow.keras.layers import Input, Conv1D, Dense, Flatten, Reshape, Dropout
+from sklearn.preprocessing import StandardScaler
+from sklearn.metrics import roc_auc_score, precision_score, recall_score, f1_score, confusion_matrix
+from tensorflow.keras import Model, Input
+from tensorflow.keras.layers import Conv1D, Dense, Flatten, Reshape, Dropout
 from tensorflow.keras.optimizers import Adam
 from tensorflow.keras.callbacks import EarlyStopping
-from sklearn.preprocessing import StandardScaler
-import os
 
-# ============================================================
+# =========================
 # Paths
-# ============================================================
+# =========================
 DATA_PATH = Path(r"D:\Final Year\Project\Anomaly Detection\Anomaly Detection\ICU Monitoring\Datasets\DATETIMEEVENTS.csv")
 OUTPUT_DIR = Path(r"D:\Final Year\Project\Anomaly Detection\Anomaly Detection\ICU Monitoring\Results of all Models for DATETIMEEVENTS\TCN")
 SUMMARY_DIR = OUTPUT_DIR.parent / "Summary of DATETIMEEVENTS"
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 os.makedirs(SUMMARY_DIR, exist_ok=True)
 
-print(f"\n=== Processing {DATA_PATH.name} for TCN-based Anomaly Detection ===")
+print("\n=== Running TCN Anomaly Detection with 90/95/98 threshold evaluation ===")
 
-# ============================================================
-# Detect encoding and delimiter
-# ============================================================
-with open(DATA_PATH, "rb") as f:
-    enc = chardet.detect(f.read())["encoding"]
-encoding = enc or "utf-8"
-print(f"✅ Encoding: {encoding}")
-
-with open(DATA_PATH, "r", encoding=encoding, errors="ignore") as f:
-    sample = f.read(2048)
-best_delim = "," if sample.count(",") > sample.count(";") else ";"
-print(f"🔍 Delimiter detected: '{best_delim}'")
-
-# ============================================================
+# =========================
 # Load dataset
-# ============================================================
-df = pd.read_csv(DATA_PATH, encoding=encoding, delimiter=best_delim, engine="python", on_bad_lines="skip")
-print(f"✅ Loaded data → shape={df.shape}")
+# =========================
+df = pd.read_csv(DATA_PATH, engine="python", on_bad_lines="skip")
 
-# ============================================================
-# Preprocess
-# ============================================================
-# Convert all numeric-like columns
-for col in df.columns:
-    try:
-        df[col] = pd.to_numeric(df[col], errors="coerce")
-    except Exception:
-        pass
-
-# Handle charttime (if available)
+# Convert charttime
 if "charttime" in df.columns:
     df["charttime"] = pd.to_datetime(df["charttime"], errors="coerce")
-    df = df.sort_values("charttime")
-    df["time_diff_min"] = df["charttime"].diff().dt.total_seconds() / 60.0
-    df["time_diff_min"] = df["time_diff_min"].fillna(0)
+
+# =========================
+# Create time_diff_min
+# =========================
+if "subject_id" in df.columns and "charttime" in df.columns and df["charttime"].notna().sum() > 1:
+    df = df.sort_values(["subject_id", "charttime"])
+    df["time_diff_min"] = df.groupby("subject_id")["charttime"].diff().dt.total_seconds() / 60
 else:
-    df["time_diff_min"] = np.arange(len(df)).astype(float)
+    df = df.sort_values("charttime") if "charttime" in df.columns else df
+    df["time_diff_min"] = df["charttime"].diff().dt.total_seconds() / 60 if "charttime" in df.columns else np.arange(len(df))
 
-# Keep only numeric columns
-numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
+df["time_diff_min"] = df["time_diff_min"].fillna(0)
 
-if not numeric_cols:
-    raise ValueError("❌ No usable numeric columns found in DATETIMEEVENTS.csv for TCN model.")
+# =========================
+# Select numeric columns
+# =========================
+num_cols = df.select_dtypes(include=[np.number]).columns.tolist()
+df_numeric = df[num_cols].copy()
+df_numeric.replace([np.inf, -np.inf], np.nan, inplace=True)
+df_numeric.fillna(df_numeric.mean(), inplace=True)
 
-df_numeric = df[numeric_cols].fillna(df[numeric_cols].mean())
-print(f"🧮 Using numeric columns: {numeric_cols}")
+print(f"Using numeric columns: {num_cols}")
 
-# ============================================================
+# =========================
+# True anomaly labels (SysBP / Pulse) - same as your pipeline
+# =========================
+gt = np.zeros(len(df_numeric), dtype=int)
+
+if "SysBP" in df_numeric.columns:
+    sbp = df_numeric["SysBP"].values
+    gt = np.where((sbp > 140) | (sbp < 90), 1, gt)
+
+if "Pulse" in df_numeric.columns:
+    pulse = df_numeric["Pulse"].values
+    gt = np.where((pulse > 100) | (pulse < 60), 1, gt)
+
+# =========================
 # Scale and create sequences
-# ============================================================
+# =========================
 scaler = StandardScaler()
 X_scaled = scaler.fit_transform(df_numeric)
 
-def create_sequences(X, seq_len=10):
-    sequences = []
-    for i in range(len(X) - seq_len):
-        sequences.append(X[i:i+seq_len])
-    return np.array(sequences)
-
 SEQ_LEN = 10
-X_seq = create_sequences(X_scaled, seq_len=SEQ_LEN)
-print(f"📊 Created sequences with shape: {X_seq.shape}")
 
-# ============================================================
-# Define TCN Autoencoder
-# ============================================================
-input_shape = (X_seq.shape[1], X_seq.shape[2])
-inputs = Input(shape=input_shape)
+def create_sequences(X, length):
+    return np.array([X[i:i+length] for i in range(len(X) - length)])
 
-# Encoder
-x = Conv1D(64, 2, activation="relu", padding="causal")(inputs)
+X_seq = create_sequences(X_scaled, SEQ_LEN)
+
+# Label a sequence anomalous if ANY point inside is anomalous
+y_true_seq = np.array([1 if gt[i:i+SEQ_LEN].sum() > 0 else 0 for i in range(len(X_seq))])
+
+print(f"Sequences: {X_seq.shape}, True anomalies in sequences: {y_true_seq.sum()}")
+
+# =========================
+# TCN Autoencoder Model (unchanged architecture)
+# =========================
+inputs = Input(shape=(SEQ_LEN, X_seq.shape[2]))
+x = Conv1D(64, 3, activation="relu", padding="causal")(inputs)
 x = Dropout(0.1)(x)
-x = Conv1D(32, 2, activation="relu", padding="causal")(x)
+x = Conv1D(32, 3, activation="relu", padding="causal")(x)
 x = Flatten()(x)
 encoded = Dense(32, activation="relu")(x)
 
-# Decoder
-x = Dense(X_seq.shape[1] * X_seq.shape[2], activation="relu")(encoded)
-x = Reshape((X_seq.shape[1], X_seq.shape[2]))(x)
-x = Conv1D(32, 2, activation="relu", padding="causal")(x)
-decoded = Conv1D(X_seq.shape[2], 2, activation="linear", padding="same")(x)
+x = Dense(SEQ_LEN * X_seq.shape[2], activation="relu")(encoded)
+x = Reshape((SEQ_LEN, X_seq.shape[2]))(x)
+x = Conv1D(32, 3, activation="relu", padding="causal")(x)
+decoded = Conv1D(X_seq.shape[2], 3, activation="linear", padding="same")(x)
 
-tcn_autoencoder = Model(inputs, decoded)
-tcn_autoencoder.compile(optimizer=Adam(learning_rate=0.001), loss="mse")
-tcn_autoencoder.summary()
+model = Model(inputs, decoded)
+model.compile(optimizer=Adam(1e-3), loss="mse")
 
-# ============================================================
-# Train Model
-# ============================================================
-early_stop = EarlyStopping(monitor="loss", patience=5, restore_best_weights=True)
-
-history = tcn_autoencoder.fit(
+model.fit(
     X_seq, X_seq,
-    epochs=50,
+    epochs=40,
     batch_size=32,
-    shuffle=True,
     validation_split=0.1,
-    callbacks=[early_stop],
+    callbacks=[EarlyStopping(patience=5, restore_best_weights=True)],
     verbose=1
 )
 
-# ============================================================
-# Compute Reconstruction Error
-# ============================================================
-reconstructions = tcn_autoencoder.predict(X_seq)
-mse = np.mean(np.square(X_seq - reconstructions), axis=(1, 2))
-threshold = np.percentile(mse, 95)
-labels = np.where(mse > threshold, "Anomaly", "Normal")
+# =========================
+# Reconstruction Error
+# =========================
+recon = model.predict(X_seq)
+mse = np.mean(np.square(X_seq - recon), axis=(1, 2))
 
-# ============================================================
-# Save Results
-# ============================================================
+# =========================
+# Evaluate exactly at 90%, 95%, 98% thresholds
+# =========================
+percentiles = [90, 95, 98]
+rows = []
+best = None
+best_f1 = -1.0
+
+# compute AUC once (uses continuous scores)
+try:
+    auc_score = roc_auc_score(y_true_seq, mse) if len(np.unique(y_true_seq)) > 1 else np.nan
+except Exception:
+    auc_score = np.nan
+
+for pct in percentiles:
+    thr = np.percentile(mse, pct)
+    y_pred = (mse >= thr).astype(int)
+
+    # metrics (handle degenerate CM shapes)
+    try:
+        precision = precision_score(y_true_seq, y_pred, zero_division=0)
+        recall = recall_score(y_true_seq, y_pred, zero_division=0)
+        f1 = f1_score(y_true_seq, y_pred, zero_division=0)
+    except Exception:
+        precision = recall = f1 = 0.0
+
+    cm = confusion_matrix(y_true_seq, y_pred)
+    if cm.size == 4:
+        tn, fp, fn, tp = cm.ravel()
+    else:
+        # fallback if only one class present in y_true or y_pred
+        tn = fp = fn = tp = 0
+        # try to infer counts if possible
+        if cm.shape == (1,1):
+            if y_true_seq[0] == 0 and y_pred.sum() == 0:
+                tn = cm[0,0]
+            elif y_true_seq[0] == 1 and y_pred.sum() == 1:
+                tp = cm[0,0]
+
+    far = fp / (fp + tn) if (fp + tn) > 0 else 0.0
+
+    row = {
+        "Percentile": pct,
+        "Threshold_Value": float(thr),
+        "AUC(of MSE)": float(auc_score) if not np.isnan(auc_score) else np.nan,
+        "Precision": float(precision),
+        "Recall": float(recall),
+        "F1": float(f1),
+        "FAR": float(far),
+        "GT_Anomalies": int(y_true_seq.sum()),
+        "Predicted_Anomalies": int(y_pred.sum())
+    }
+    rows.append(row)
+
+    # choose best among these three: primary F1, tie-breaker recall then precision
+    if (f1 > best_f1) or (f1 == best_f1 and (recall > (best.get("Recall") if best else -1))):
+        best_f1 = f1
+        best = row
+
+# =========================
+# Save per-threshold CSV and best-threshold CSV
+# =========================
+thresholds_df = pd.DataFrame(rows)
+thresholds_file = SUMMARY_DIR / "TCN_DATETIMEEVENTS_Thresholds_90_95_98.csv"
+thresholds_df.to_csv(thresholds_file, index=False)
+print(f"\nSaved per-threshold metrics → {thresholds_file}")
+
+best_file = SUMMARY_DIR / "TCN_DATETIMEEVENTS_BestThreshold.csv"
+pd.DataFrame([best]).to_csv(best_file, index=False)
+print(f"Saved best-threshold summary → {best_file}")
+
+print("\nAll evaluated thresholds (90,95,98):")
+print(thresholds_df)
+print("\nBest threshold chosen among them:")
+print(best)
+
+# =========================
+# Save sequence-level predictions for the best threshold (optional)
+# =========================
+best_thr = best["Threshold_Value"]
+best_y_pred = (mse >= best_thr).astype(int)
 results_df = pd.DataFrame({
-    "Index": np.arange(len(mse)),
-    "Reconstruction_Error": mse,
-    "Anomaly_Label": labels
+    "Sequence_Index": np.arange(len(mse)),
+    "Reconstruction_MSE": mse,
+    "Pred_Label_at_BestThreshold": best_y_pred,
+    "GT_Label": y_true_seq
 })
-results_file = OUTPUT_DIR / "DATETIMEEVENTS_TCN_Results.csv"
-results_df.to_csv(results_file, index=False)
-print(f"\n✅ Results saved → {results_file}")
+results_csv = OUTPUT_DIR / "TCN_DATETIMEEVENTS_Sequence_Results_BestThreshold.csv"
+results_df.to_csv(results_csv, index=False)
+print(f"Saved sequence-level results → {results_csv}")
 
-# ============================================================
-# Summary
-# ============================================================
-summary_data = {
-    "Total Records": len(mse),
-    "Detected Anomalies": np.sum(labels == "Anomaly"),
-    "Anomaly Percentage (%)": round(100 * np.mean(labels == "Anomaly"), 2),
-    "Input Features": X_seq.shape[2],
-    "Sequence Length": SEQ_LEN,
-    "Threshold (95th %ile)": round(threshold, 6)
-}
-summary_df = pd.DataFrame([summary_data])
-summary_file = SUMMARY_DIR / "TCN_DATETIMEEVENTS_Summary.csv"
-summary_df.to_csv(summary_file, index=False)
-print(f"📄 Summary saved → {summary_file}")
-
-# ============================================================
-# Visualization
-# ============================================================
-plt.figure(figsize=(12, 6))
-plt.plot(mse, label="Reconstruction Error", color="blue", alpha=0.7)
-plt.axhline(threshold, color="orange", linestyle="--", label="Threshold (95th %ile)")
-plt.scatter(np.where(mse > threshold), mse[mse > threshold], color="red", marker="x", label="Anomalies")
-plt.title("TCN-Based Anomaly Detection - DATETIMEEVENTS.csv")
-plt.xlabel("Index")
-plt.ylabel("Reconstruction Error (MSE)")
+# =========================
+# Plot reconstruction error & mark thresholds
+# =========================
+plt.figure(figsize=(12,6))
+plt.plot(mse, label="Reconstruction MSE")
+for r in rows:
+    plt.axhline(r["Threshold_Value"], linestyle="--", label=f"{int(r['Percentile'])}th pct = {r['Threshold_Value']:.6f}")
+# mark predicted anomalies for best threshold
+pred_centers = np.where(best_y_pred == 1)[0]
+plt.scatter(pred_centers, mse[pred_centers], color="red", marker="x", label="Predicted anomalies (best)")
+plt.title("TCN Reconstruction Error — thresholds 90/95/98 (best marked)")
+plt.xlabel("Sequence index")
+plt.ylabel("MSE")
 plt.legend()
 plt.grid(True)
 plt.tight_layout()
-plt.savefig(OUTPUT_DIR / "DATETIMEEVENTS_TCN_AnomalyPlot.png")
+plt.savefig(OUTPUT_DIR / "TCN_DATETIMEEVENTS_MSE_with_thresholds.png")
 plt.close()
+print(f"Saved plot → {OUTPUT_DIR / 'TCN_DATETIMEEVENTS_MSE_with_thresholds.png'}")
 
-print(f"📊 Plot saved → {OUTPUT_DIR / 'DATETIMEEVENTS_TCN_AnomalyPlot.png'}")
-print("\n✅ TCN anomaly detection training completed successfully!")
+print("\n✅ TCN anomaly detection completed with 90/95/98 evaluation. Best threshold chosen only from those three.")

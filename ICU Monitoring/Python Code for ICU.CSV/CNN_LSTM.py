@@ -3,20 +3,22 @@ import numpy as np
 from pathlib import Path
 import matplotlib.pyplot as plt
 from sklearn.preprocessing import StandardScaler
-from sklearn.metrics import roc_auc_score, precision_score, recall_score, f1_score, confusion_matrix
 from tensorflow.keras import layers, models
+from sklearn.metrics import (
+    roc_auc_score, precision_score, recall_score, f1_score, confusion_matrix
+)
 
 # ======================
 # Paths
 # ======================
 DATA_PATH = Path(r"D:\Final Year\Project\Anomaly Detection\Anomaly Detection\ICU Monitoring\ICU Datasets\ICU.csv")
 OUTPUT_DIR = Path(r"D:\Final Year\Project\Anomaly Detection\Anomaly Detection\ICU Monitoring\Results of all Models\CNN-LSTM-ModelResults")
-SUMMARY_PATH = OUTPUT_DIR / "CNNLSTM_Anomaly_Summary.csv"
-
+SUMMARY_DIR = OUTPUT_DIR / "Summary"
 OUTPUT_DIR.mkdir(exist_ok=True, parents=True)
+SUMMARY_DIR.mkdir(exist_ok=True, parents=True)
 
 # ======================
-# Thresholds (for physiological GT labels)
+# Thresholds for vital signs
 # ======================
 THRESHOLDS = {
     "HR_tachy": 100, "HR_brady": 60,
@@ -42,24 +44,23 @@ def label_anomalies(series, col_name, gt_array, index_offset):
     if vital == "HR":
         anomalous_indices += list(series[series > THRESHOLDS["HR_tachy"]].index)
         anomalous_indices += list(series[series < THRESHOLDS["HR_brady"]].index)
+
     elif vital == "SBP":
         anomalous_indices += list(series[series > THRESHOLDS["SBP_high"]].index)
         anomalous_indices += list(series[series < THRESHOLDS["SBP_low"]].index)
 
+    # Mark GT array
     for i in anomalous_indices:
         if i + index_offset < len(gt_array):
             gt_array[i + index_offset] = 1
 
-    return [{"vital": col_name, "index": i + index_offset} for i in anomalous_indices]
+    return anomalous_indices
 
 # ======================
 # Create sequences
 # ======================
-def create_sequences(X, seq_length=10):
-    sequences = []
-    for i in range(len(X) - seq_length):
-        sequences.append(X[i:i+seq_length])
-    return np.array(sequences)
+def create_sequences(X, seq_len=10):
+    return np.array([X[i:i+seq_len] for i in range(len(X)-seq_len)])
 
 # ======================
 # CNN-LSTM Autoencoder
@@ -79,113 +80,113 @@ def build_cnn_lstm_autoencoder(seq_length, n_features):
     return model
 
 # ======================
-# Evaluation
-# ======================
-def evaluate_anomaly_detection(y_true, mse_scores):
-    try:
-        auc = roc_auc_score(y_true, mse_scores)
-    except ValueError:
-        auc = np.nan
-
-    best_f1, best_threshold = 0, np.percentile(mse_scores, 90)
-    for q in np.linspace(90, 99.9, 100):
-        threshold = np.percentile(mse_scores, q)
-        y_pred = (mse_scores >= threshold).astype(int)
-        if np.sum(y_pred) > 0 and np.sum(y_true) > 0:
-            f1 = f1_score(y_true, y_pred, zero_division=0)
-            if f1 > best_f1:
-                best_f1, best_threshold = f1, threshold
-
-    y_pred_best = (mse_scores >= best_threshold).astype(int)
-    cm = confusion_matrix(y_true, y_pred_best)
-    tn, fp, fn, tp = cm.ravel() if cm.size == 4 else (0, 0, 0, 0)
-
-    return {
-        "AUC": auc,
-        "F1": best_f1,
-        "Precision": precision_score(y_true, y_pred_best, zero_division=0),
-        "Recall": recall_score(y_true, y_pred_best, zero_division=0),
-        "FAR": fp / (fp + tn) if (fp + tn) > 0 else 0,
-        "Threshold": best_threshold
-    }
-
-# ======================
-# Main Process
+# Main Processing
 # ======================
 print(f"\n=== Training CNN-LSTM model on {DATA_PATH.name} ===")
 
 df = pd.read_csv(DATA_PATH)
 df = df[["SysBP", "Pulse"]].dropna().reset_index(drop=True)
 
+# Build Ground Truth (same pipeline as your original)
 gt_array = np.zeros(len(df))
-anomalies = []
 for col in df.columns:
-    anomalies.extend(label_anomalies(df[col], col, gt_array, 0))
+    label_anomalies(df[col], col, gt_array, 0)
 
+# Scaling
 scaler = StandardScaler()
 X_scaled = scaler.fit_transform(df)
 
+# Sequence preparation
 SEQ_LEN = 10
 X_seq = create_sequences(X_scaled, SEQ_LEN)
 y_seq = gt_array[SEQ_LEN:]
 
+# Train/Test split
 train_size = int(0.8 * len(X_seq))
 X_train, X_test = X_seq[:train_size], X_seq[train_size:]
 y_test = y_seq[train_size:]
 
+# Train the model
 model = build_cnn_lstm_autoencoder(SEQ_LEN, X_scaled.shape[1])
-history = model.fit(X_train, X_train, epochs=50, batch_size=32, validation_split=0.1, verbose=0)
+history = model.fit(X_train, X_train, epochs=40, batch_size=32, validation_split=0.1, verbose=1)
 
-print(f"Training complete | Final Loss: {history.history['loss'][-1]:.5f}")
-
-# Reconstruction
-X_test_pred = model.predict(X_test)
-mse_scores = np.mean(np.square(X_test_pred - X_test), axis=(1, 2))
-
-# Evaluate
-eval_results = evaluate_anomaly_detection(y_test, mse_scores)
-
-print(f"\nResults for CNN-LSTM:")
-print(f"AUC={eval_results['AUC']:.4f} | F1={eval_results['F1']:.4f} | Precision={eval_results['Precision']:.4f} | Recall={eval_results['Recall']:.4f} | FAR={eval_results['FAR']:.4f}")
+# Predict
+X_pred = model.predict(X_test)
+mse_scores = np.mean(np.square(X_pred - X_test), axis=(1, 2))
 
 # ======================
-# SAVE UPDATED SUMMARY CSV (as you requested)
+# Threshold Evaluation (90, 95, 98)
 # ======================
-summary_df = pd.DataFrame([{
-    "AUC": eval_results["AUC"],
-    "F1": eval_results["F1"],
-    "Precision": eval_results["Precision"],
-    "Recall": eval_results["Recall"],
-    "FAR": eval_results["FAR"],
-    "Best_Threshold": eval_results["Threshold"]
-}])
+thresholds = [90, 95, 98]
+results = []
+best_f1 = -1
+best_row = None
 
-summary_df.to_csv(SUMMARY_PATH, index=False)
+for pct in thresholds:
+    thr = np.percentile(mse_scores, pct)
+    y_pred = (mse_scores >= thr).astype(int)
 
-print(f"\n🧾 Summary saved → {SUMMARY_PATH}")
+    # Metrics
+    try:
+        auc = roc_auc_score(y_test, mse_scores)
+    except:
+        auc = np.nan
+
+    precision = precision_score(y_test, y_pred, zero_division=0)
+    recall = recall_score(y_test, y_pred, zero_division=0)
+    f1 = f1_score(y_test, y_pred, zero_division=0)
+
+    cm = confusion_matrix(y_test, y_pred)
+    tn, fp, fn, tp = cm.ravel() if cm.size == 4 else (0,0,0,0)
+    far = fp / (fp + tn) if (fp + tn) > 0 else 0
+
+    row = {
+        "Threshold_percentile": pct,
+        "Threshold_value": thr,
+        "AUC": auc,
+        "Precision": precision,
+        "Recall": recall,
+        "F1": f1,
+        "FAR": far,
+        "TP": tp, "FP": fp, "TN": tn, "FN": fn,
+        "GT_Anomalies": int(y_test.sum()),
+        "Pred_Anomalies": int(y_pred.sum())
+    }
+    results.append(row)
+
+    # Best threshold selection
+    if f1 > best_f1:
+        best_f1 = f1
+        best_row = row
 
 # ======================
-# Plot anomalies
+# Save CSVs
 # ======================
-threshold = eval_results["Threshold"]
-anomaly_indices = np.where(mse_scores >= threshold)[0] + SEQ_LEN + train_size
+pd.DataFrame(results).to_csv(SUMMARY_DIR / "CNNLSTM_ICU_Thresholds_90_95_98.csv", index=False)
+pd.DataFrame([best_row]).to_csv(SUMMARY_DIR / "CNNLSTM_ICU_BestThreshold.csv", index=False)
 
+print("\n=== BEST THRESHOLD (from 90, 95, 98) ===")
+print(best_row)
+
+# ======================
+# Plot MSE with threshold
+# ======================
 plt.figure(figsize=(12,6))
-plt.plot(df["SysBP"], label="SysBP", alpha=0.7)
-plt.plot(df["Pulse"], label="Pulse", alpha=0.7)
+plt.plot(mse_scores, label="MSE Error")
 
-for idx in anomaly_indices:
-    if idx < len(df):
-        plt.scatter(idx, df.loc[idx, "SysBP"], color="red", marker="x", s=50)
-        plt.scatter(idx, df.loc[idx, "Pulse"], color="red", marker="x", s=50)
+best_thr = best_row["Threshold_value"]
+plt.axhline(best_thr, color='orange', linestyle='--', label=f"Best Threshold ({best_row['Threshold_percentile']}%)")
 
-plt.title("ICU Anomaly Detection using CNN-LSTM")
-plt.xlabel("Record Index")
-plt.ylabel("Value")
+best_pred = (mse_scores >= best_thr).astype(int)
+plt.scatter(np.where(best_pred==1)[0], mse_scores[best_pred==1], c="red", marker="x", label="Detected Anomaly")
+
+plt.title("CNN-LSTM ICU Anomaly Detection (90/95/98 Threshold Evaluation)")
+plt.xlabel("Index")
+plt.ylabel("Reconstruction Error (MSE)")
 plt.legend()
 plt.grid(True)
 plt.tight_layout()
-plt.savefig(OUTPUT_DIR / "ICU_CNNLSTM_AnomalyPlot.png")
+plt.savefig(OUTPUT_DIR / "CNNLSTM_ICU_AnomalyPlot.png")
 plt.close()
 
-print(f"\n✅ Model training, evaluation, and plots completed successfully.")
+print("\nCNN-LSTM anomaly detection completed successfully.")

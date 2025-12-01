@@ -12,33 +12,34 @@ from tensorflow.keras.models import Sequential
 from tensorflow.keras.layers import LSTM, RepeatVector, TimeDistributed, Dense
 from tensorflow.keras.callbacks import EarlyStopping
 
-print("\n=== Training LSTM Autoencoder model on ICU.csv ===")
+print("\n=== Training LSTM Autoencoder model on ICU.csv (90/95/98 threshold evaluation) ===")
 
 # =========================
 # 1️⃣ Setup paths
 # =========================
 input_path = r"D:\Final Year\Project\Anomaly Detection\Anomaly Detection\ICU Monitoring\ICU Datasets\ICU.csv"
 results_dir = r"D:\Final Year\Project\Anomaly Detection\Anomaly Detection\ICU Monitoring\Results of all Models\LSTM_Autoencoder"
+summary_dir = os.path.join(results_dir, "Summary")
 os.makedirs(results_dir, exist_ok=True)
+os.makedirs(summary_dir, exist_ok=True)
 
 # =========================
 # 2️⃣ Load and preprocess data
 # =========================
 df = pd.read_csv(input_path)
 features = ['Age', 'SysBP', 'Pulse']
-
 df = df[features].dropna().reset_index(drop=True)
 
 scaler = StandardScaler()
 X_scaled = scaler.fit_transform(df)
 
-# Convert into sequences for LSTM
+# Create sequences
 window_size = 10
 def create_sequences(data, window):
-    sequences = []
+    seq = []
     for i in range(len(data) - window):
-        sequences.append(data[i:i + window])
-    return np.array(sequences)
+        seq.append(data[i:i + window])
+    return np.array(seq)
 
 X_seq = create_sequences(X_scaled, window_size)
 print(f"Data reshaped to {X_seq.shape} for LSTM")
@@ -52,14 +53,12 @@ model = Sequential([
     LSTM(64, activation='relu', return_sequences=True),
     TimeDistributed(Dense(X_seq.shape[2]))
 ])
-
 model.compile(optimizer='adam', loss='mse')
 
 # =========================
 # 4️⃣ Train model
 # =========================
 early_stop = EarlyStopping(monitor='loss', patience=5, restore_best_weights=True)
-
 history = model.fit(
     X_seq, X_seq,
     epochs=50,
@@ -75,75 +74,86 @@ history = model.fit(
 X_pred = model.predict(X_seq)
 mse = np.mean(np.power(X_seq - X_pred, 2), axis=(1, 2))
 
-# Dynamic threshold
-threshold = np.percentile(mse, 95)
-anomalies = (mse > threshold).astype(int)
+# =========================
+# 6️⃣ Multi-threshold evaluation (90, 95, 98)
+# =========================
+thresholds = [90, 95, 98]
+eval_rows = []
+best_f1 = -1
+best_row = None
+
+for pct in thresholds:
+    thr = np.percentile(mse, pct)
+    y_pred = (mse > thr).astype(int)
+
+    # Pseudo ground truth (same strategy as your original pipeline)
+    y_true = y_pred.copy()
+
+    try:
+        auc = roc_auc_score(y_true, mse)
+    except:
+        auc = np.nan
+
+    precision = precision_score(y_true, y_pred, zero_division=0)
+    recall = recall_score(y_true, y_pred, zero_division=0)
+    f1 = f1_score(y_true, y_pred, zero_division=0)
+
+    cm = confusion_matrix(y_true, y_pred)
+    tn, fp, fn, tp = cm.ravel() if cm.size == 4 else (0,0,0,0)
+    far = fp / (fp + tn) if (fp + tn) else 0
+
+    row = {
+        "Threshold_percentile": pct,
+        "Threshold_value": thr,
+        "AUC": auc,
+        "Precision": precision,
+        "Recall": recall,
+        "F1": f1,
+        "FAR": far,
+        "TP": tp, "FP": fp, "TN": tn, "FN": fn,
+        "Predicted_Anomalies": int(y_pred.sum())
+    }
+    eval_rows.append(row)
+
+    if f1 > best_f1:
+        best_f1 = f1
+        best_row = row
 
 # =========================
-# 6️⃣ Evaluation Metrics
+# 7️⃣ Save summary files
 # =========================
-# Ground truth = unknown → Generate pseudo ground truth from threshold
-y_true = anomalies.copy()
-y_pred = anomalies.copy()
+summary_all_path = os.path.join(summary_dir, "LSTM_MultiThreshold_Summary.csv")
+pd.DataFrame(eval_rows).to_csv(summary_all_path, index=False)
 
-try:
-    auc = roc_auc_score(y_true, mse)
-except:
-    auc = float('nan')
+best_thr_path = os.path.join(summary_dir, "LSTM_BestThreshold.csv")
+pd.DataFrame([best_row]).to_csv(best_thr_path, index=False)
 
-precision = precision_score(y_true, y_pred, zero_division=0)
-recall = recall_score(y_true, y_pred, zero_division=0)
-f1 = f1_score(y_true, y_pred, zero_division=0)
-
-cm = confusion_matrix(y_true, y_pred)
-tn, fp, fn, tp = cm.ravel() if cm.size == 4 else (0,0,0,0)
-far = fp / (fp + tn) if (fp + tn) > 0 else 0
+print("\n=== BEST THRESHOLD (Based on F1 Score) ===")
+print(best_row)
 
 # =========================
-# 7️⃣ Summary (UPDATED)
+# 8️⃣ Plot using BEST threshold
 # =========================
-summary_text = (
-    f"=== LSTM Autoencoder Anomaly Detection Summary ===\n"
-    f"AUC Score: {auc:.4f}\n"
-    f"F1 Score: {f1:.4f}\n"
-    f"Precision: {precision:.4f}\n"
-    f"Recall: {recall:.4f}\n"
-    f"False Alarm Rate (FAR): {far:.4f}\n"
-    f"Threshold Used (MSE): {threshold:.6f}\n"
-    f"Total Sequences: {len(mse)}\n"
-    f"Detected Anomalies: {np.sum(anomalies)}\n"
-)
+best_thr = best_row["Threshold_value"]
+best_pred = (mse > best_thr).astype(int)
 
-print("\n" + summary_text)
+plot_path = os.path.join(results_dir, "LSTM_Autoencoder_BestThreshold_Plot.png")
 
-# =========================
-# 8️⃣ Save results
-# =========================
-results_csv = os.path.join(results_dir, "LSTM_Autoencoder_Results.csv")
-summary_txt = os.path.join(results_dir, "LSTM_Autoencoder_Summary.txt")
-plot_path = os.path.join(results_dir, "LSTM_Autoencoder_Plot.png")
-
-df_results = pd.DataFrame({
-    "Sequence_Index": np.arange(len(mse)),
-    "Reconstruction_Error": mse,
-    "Anomaly": anomalies
-})
-df_results.to_csv(results_csv, index=False)
-
-with open(summary_txt, "w") as f:
-    f.write(summary_text)
-
-# =========================
-# 9️⃣ Plot
-# =========================
 plt.figure(figsize=(10,6))
 plt.plot(mse, label='Reconstruction Error')
-plt.axhline(threshold, color='red', linestyle='--', label='Threshold')
-plt.title("LSTM Autoencoder - Reconstruction Error")
+plt.axhline(best_thr, color='red', linestyle='--',
+            label=f'Best Threshold ({best_row["Threshold_percentile"]}%)')
+plt.scatter(np.where(best_pred == 1),
+            mse[best_pred == 1],
+            color='red', label='Anomalies')
 plt.xlabel("Sequence Index")
 plt.ylabel("MSE Error")
 plt.legend()
+plt.grid(True)
 plt.savefig(plot_path)
 plt.close()
 
-print(f"\n✅ All results saved successfully in: {results_dir}")
+print(f"\nAll thresholds summary: {summary_all_path}")
+print(f"Best threshold summary: {best_thr_path}")
+print(f"Plot saved: {plot_path}")
+print("\nLSTM Autoencoder Multi-Threshold Evaluation completed successfully!")

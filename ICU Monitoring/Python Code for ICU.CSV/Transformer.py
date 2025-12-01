@@ -18,8 +18,12 @@ input_path = r"D:\Final Year\Project\Anomaly Detection\Anomaly Detection\ICU Mon
 results_dir = r"D:\Final Year\Project\Anomaly Detection\Anomaly Detection\ICU Monitoring\Results of all Models\Transformer-ModelResult"
 os.makedirs(results_dir, exist_ok=True)
 
+multi_summary_path = os.path.join(results_dir, "Transformer_MultiThreshold_Summary.csv")
+best_summary_path = os.path.join(results_dir, "Transformer_BestThreshold.csv")
+detailed_path = os.path.join(results_dir, "Transformer_Autoencoder_Detailed_Results.csv")
+
 # =========================
-# Physiological thresholds (OPTION A)
+# Physiological thresholds
 # =========================
 THRESHOLDS = {
     "HR_tachy": 100, "HR_brady": 60,
@@ -30,204 +34,140 @@ VITAL_MAPPING = {
     "SBP": ["SysBP", "SBP", "SystolicBP"]
 }
 
-def label_anomalies(series, col_name, gt_array, index_offset=0):
-    """Label physiological anomalies in `series` and update gt_array in-place.
-       Returns list of anomaly dicts (for optional plotting)."""
+def label_anomalies(series, col_name, gt_array, offset=0):
     s = pd.to_numeric(series, errors="coerce").dropna().reset_index(drop=True)
     if s.empty:
-        return []
-    vital = next((v for v, cols in VITAL_MAPPING.items() if col_name in cols), None)
-    anomalous_indices = []
+        return
+    vital = next((v for v,cols in VITAL_MAPPING.items() if col_name in cols),None)
+
     if vital == "HR":
-        anomalous_indices += list(s[s > THRESHOLDS["HR_tachy"]].index)
-        anomalous_indices += list(s[s < THRESHOLDS["HR_brady"]].index)
+        gt_array[s > THRESHOLDS["HR_tachy"]] = 1
+        gt_array[s < THRESHOLDS["HR_brady"]] = 1
     elif vital == "SBP":
-        anomalous_indices += list(s[s > THRESHOLDS["SBP_high"]].index)
-        anomalous_indices += list(s[s < THRESHOLDS["SBP_low"]].index)
-
-    for i in anomalous_indices:
-        if (i + index_offset) < len(gt_array):
-            gt_array[i + index_offset] = 1
-
-    return [{"vital": col_name, "index": i + index_offset} for i in anomalous_indices]
+        gt_array[s > THRESHOLDS["SBP_high"]] = 1
+        gt_array[s < THRESHOLDS["SBP_low"]] = 1
 
 # =========================
-# Evaluation helper
+# Transformer Block
 # =========================
-def evaluate_with_threshold_search(y_true, scores, q_min=90.0, q_max=99.9, q_steps=100):
-    """Find best threshold by scanning percentiles between q_min and q_max.
-       Returns dict with AUC, best F1, Precision, Recall, FAR and best threshold."""
-    try:
-        auc = roc_auc_score(y_true, scores)
-    except ValueError:
-        auc = np.nan
+def transformer_block(inputs, heads=2, ff_dim=64, drop=0.1):
+    attn = MultiHeadAttention(num_heads=heads, key_dim=inputs.shape[-1])(inputs, inputs)
+    attn = Dropout(drop)(attn)
+    out1 = LayerNormalization()(inputs + attn)
 
-    best_f1 = -1.0
-    best_thresh = np.percentile(scores, q_min)
-    for q in np.linspace(q_min, q_max, q_steps):
-        thresh = np.percentile(scores, q)
-        y_pred = (scores >= thresh).astype(int)
-        if y_pred.sum() == 0:
-            continue
-        # require at least one positive in y_true to compute meaningful F1
-        if y_true.sum() == 0:
-            f1 = 0.0
-        else:
-            f1 = f1_score(y_true, y_pred, zero_division=0)
-        if f1 > best_f1:
-            best_f1 = f1
-            best_thresh = thresh
-
-    # final metrics at best_thresh
-    y_pred_best = (scores >= best_thresh).astype(int)
-    try:
-        cm = confusion_matrix(y_true, y_pred_best)
-        tn, fp, fn, tp = cm.ravel() if cm.size == 4 else (0, 0, 0, 0)
-    except Exception:
-        tn = fp = fn = tp = 0
-
-    precision = precision_score(y_true, y_pred_best, zero_division=0)
-    recall = recall_score(y_true, y_pred_best, zero_division=0)
-    f1 = f1_score(y_true, y_pred_best, zero_division=0)
-    far = fp / (fp + tn) if (fp + tn) > 0 else 0.0
-
-    return {
-        "AUC": auc,
-        "F1": f1,
-        "Precision": precision,
-        "Recall": recall,
-        "FAR": far,
-        "Best_Threshold": float(best_thresh)
-    }
-
-# =========================
-# Transformer Autoencoder (model)
-# =========================
-def transformer_block(inputs, num_heads, ff_dim, dropout=0.1):
-    attn_output = MultiHeadAttention(num_heads=num_heads, key_dim=inputs.shape[-1])(inputs, inputs)
-    attn_output = Dropout(dropout)(attn_output)
-    out1 = LayerNormalization(epsilon=1e-6)(inputs + attn_output)
     ffn = Dense(ff_dim, activation="relu")(out1)
     ffn = Dense(inputs.shape[-1])(ffn)
-    ffn = Dropout(dropout)(ffn)
-    out2 = LayerNormalization(epsilon=1e-6)(out1 + ffn)
+    ffn = Dropout(drop)(ffn)
+    out2 = LayerNormalization()(out1 + ffn)
     return out2
 
-def build_transformer_autoencoder(input_shape, num_heads=2, ff_dim=64):
-    inputs = Input(shape=input_shape)
-    x = transformer_block(inputs, num_heads=num_heads, ff_dim=ff_dim)
-    x = transformer_block(x, num_heads=num_heads, ff_dim=ff_dim)
-    encoded = Dense(16, activation='relu')(x)
-    x = transformer_block(encoded, num_heads=num_heads, ff_dim=ff_dim)
-    decoded = Dense(input_shape[-1], activation=None)(x)
-    model = Model(inputs, decoded)
-    model.compile(optimizer=Adam(1e-3), loss='mse')
+def build_transformer_autoencoder(input_shape):
+    input_layer = Input(shape=input_shape)
+    x = transformer_block(input_layer)
+    x = transformer_block(x)
+    encoded = Dense(16, activation="relu")(x)
+    x = transformer_block(encoded)
+    out = Dense(input_shape[-1])(x)
+    model = Model(input_layer, out)
+    model.compile(optimizer=Adam(1e-3), loss="mse")
     return model
 
 # =========================
-# MAIN
+# Load Data
 # =========================
-print("\n=== Training Transformer Autoencoder on ICU.csv (using physiological labels) ===")
 df = pd.read_csv(input_path)
+features = ['Age','SysBP','Pulse']
+df = df[features].dropna().reset_index()
 
-# keep same features as your other models
-features = ['Age', 'SysBP', 'Pulse']
-df = df[features].dropna().reset_index(drop=True)
-
-# create ground-truth labels using physiological thresholds (OPTION A)
-gt_array = np.zeros(len(df), dtype=int)
-anomaly_list = []
+gt = np.zeros(len(df))
 for col in df.columns:
-    anomaly_list.extend(label_anomalies(df[col], col, gt_array, 0))
+    label_anomalies(df[col], col, gt)
 
-# scale
 scaler = StandardScaler()
-X_scaled = scaler.fit_transform(df)
+X_scaled = scaler.fit_transform(df[features])
 
-# reshape to (samples, timesteps, features) — keep 1 timestep per record (as earlier)
-X_seq = np.expand_dims(X_scaled, axis=1)  # shape (n_samples, 1, n_features)
+# reshape into sequence length 1
+X_seq = np.expand_dims(X_scaled, axis=1)
 
-# build & train model
+# =========================
+# Training
+# =========================
+print("\nTraining Transformer Autoencoder …")
 model = build_transformer_autoencoder(X_seq.shape[1:])
-model.summary()
-
-EPOCHS = 50
-BATCH_SIZE = 32
-
-history = model.fit(
-    X_seq, X_seq,
-    epochs=EPOCHS,
-    batch_size=BATCH_SIZE,
-    validation_split=0.1,
-    verbose=1
-)
-
-# reconstructions and per-sample MSE
-reconstructions = model.predict(X_seq)
-mse = np.mean(np.power(X_seq - reconstructions, 2), axis=(1, 2))  # one MSE per sample
-
-# Evaluate: find best threshold by percentile search and compute metrics vs gt_array
-metrics = evaluate_with_threshold_search(gt_array, mse, q_min=90.0, q_max=99.9, q_steps=200)
-
-# produce anomaly indices using best threshold
-best_thresh = metrics["Best_Threshold"]
-y_pred = (mse >= best_thresh).astype(int)
-anomaly_indices = np.where(y_pred == 1)[0]
-
-# print results
-print("\n=== Transformer Autoencoder Evaluation (physiological GT) ===")
-print(f"AUC = {metrics['AUC']:.4f}")
-print(f"F1  = {metrics['F1']:.4f}")
-print(f"Precision = {metrics['Precision']:.4f}")
-print(f"Recall = {metrics['Recall']:.4f}")
-print(f"FAR = {metrics['FAR']:.4f}")
-print(f"Best Threshold (MSE) = {metrics['Best_Threshold']:.6e}")
-print(f"Detected anomaly count = {len(anomaly_indices)}")
+model.fit(X_seq, X_seq, epochs=50, batch_size=32, validation_split=0.1, verbose=1)
 
 # =========================
-# Save results & summary CSV (with requested fields)
+# Reconstruction Error
 # =========================
-results_df = df.copy()
-results_df["Reconstruction_Error"] = mse
-results_df["Anomaly_Pred"] = y_pred
-results_df["Anomaly_GT"] = gt_array
-
-results_csv = os.path.join(results_dir, "Transformer_Autoencoder_Results.csv")
-results_df.to_csv(results_csv, index=False)
-
-summary_df = pd.DataFrame([{
-    "Dataset": os.path.basename(input_path),
-    "Model": "Transformer_Autoencoder",
-    "AUC": metrics["AUC"],
-    "F1": metrics["F1"],
-    "Precision": metrics["Precision"],
-    "Recall": metrics["Recall"],
-    "FAR": metrics["FAR"],
-    "Best_Threshold": metrics["Best_Threshold"],
-    "Num_Anomalies_Detected": int(len(anomaly_indices))
-}])
-
-summary_csv = os.path.join(results_dir, "Transformer_Autoencoder_Summary.csv")
-summary_df.to_csv(summary_csv, index=False)
-
-# save anomaly indices list for convenience
-anomaly_idx_file = os.path.join(results_dir, "Transformer_Autoencoder_Anomaly_Indices.csv")
-pd.DataFrame({"Anomaly_Index": anomaly_indices}).to_csv(anomaly_idx_file, index=False)
+recon = model.predict(X_seq)
+mse = np.mean((X_seq - recon)**2, axis=(1,2))
 
 # =========================
-# Plot (scatter of SysBP vs Pulse marking anomalies)
+# MULTI-THRESHOLD EVALUATION (90/95/98)
 # =========================
-plt.figure(figsize=(8,6))
-plt.scatter(df["SysBP"], df["Pulse"], c=results_df["Anomaly_Pred"], cmap="coolwarm", edgecolors='k')
-plt.xlabel("Systolic Blood Pressure (SysBP)")
-plt.ylabel("Pulse")
-plt.title("Transformer Autoencoder: Detected Anomalies (red)")
-plt.grid(True)
-plot_path = os.path.join(results_dir, "Transformer_Autoencoder_AnomalyPlot.png")
-plt.savefig(plot_path, dpi=300, bbox_inches='tight')
-plt.close()
+thresholds = [90, 95, 98]
+results = []
 
-print(f"\n✅ Saved results to: {results_csv}")
-print(f"✅ Saved summary to: {summary_csv}")
-print(f"✅ Saved anomaly indices to: {anomaly_idx_file}")
-print(f"✅ Plot saved to: {plot_path}")
+best_f1 = -1
+best_info = None
+best_pred = None
+
+for p in thresholds:
+    thr = np.percentile(mse, p)
+    pred = (mse >= thr).astype(int)
+
+    try:
+        auc = roc_auc_score(gt, mse)
+    except:
+        auc = np.nan
+
+    precision = precision_score(gt, pred, zero_division=0)
+    recall = recall_score(gt, pred, zero_division=0)
+    f1 = f1_score(gt, pred, zero_division=0)
+    tn, fp, fn, tp = confusion_matrix(gt, pred).ravel()
+    far = fp / (fp + tn) if (fp + tn) else 0
+
+    row = {
+        "Threshold_%": p,
+        "Threshold_Value": thr,
+        "AUC": auc,
+        "Precision": precision,
+        "Recall": recall,
+        "F1": f1,
+        "FAR": far,
+        "TP": tp, "FP": fp, "TN": tn, "FN": fn,
+        "Detected_Anomalies": int(pred.sum())
+    }
+    results.append(row)
+
+    if f1 > best_f1:
+        best_f1 = f1
+        best_info = row
+        best_pred = pred.copy()
+
+# =========================
+# Save CSVs
+# =========================
+pd.DataFrame(results).to_csv(multi_summary_path, index=False)
+pd.DataFrame([best_info]).to_csv(best_summary_path, index=False)
+
+# detailed results
+detailed_df = df.copy()
+detailed_df["Reconstruction_Error"] = mse
+detailed_df["GT"] = gt
+detailed_df["Pred"] = best_pred
+detailed_df.to_csv(detailed_path, index=False)
+
+# =========================
+# Print Results
+# =========================
+print("\n=== MULTI-THRESHOLD RESULTS (90/95/98) ===")
+print(pd.DataFrame(results))
+
+print("\n=== BEST THRESHOLD ===")
+print(best_info)
+
+print("\nSaved:")
+print(multi_summary_path)
+print(best_summary_path)
+print(detailed_path)

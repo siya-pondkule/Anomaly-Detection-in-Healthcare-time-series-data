@@ -1,0 +1,2 @@
+Percentile,Threshold_Value,AUC,Precision,Recall,F1,FAR,GT_Anomalies,Predicted_Anomalies
+90,,,0.0,0.0,0.0,0,0,0

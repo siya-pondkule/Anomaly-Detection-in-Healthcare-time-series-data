@@ -15,31 +15,30 @@ input_path = r"D:\Final Year\Project\Anomaly Detection\Anomaly Detection\ICU Mon
 results_dir = r"D:\Final Year\Project\Anomaly Detection\Anomaly Detection\ICU Monitoring\Results of all Models\One-Class-SVM"
 os.makedirs(results_dir, exist_ok=True)
 
+multi_summary_csv = os.path.join(results_dir, "OneClassSVM_MultiThreshold_Summary.csv")
+best_summary_csv = os.path.join(results_dir, "OneClassSVM_BestThreshold.csv")
+results_csv = os.path.join(results_dir, "OneClassSVM_Anomaly_Results.csv")
+plot_path = os.path.join(results_dir, "OneClassSVM_Anomaly_Plot.png")
+
 # =========================
 # 2️⃣ Load and preprocess data
 # =========================
 df = pd.read_csv(input_path)
-
-# Use same columns as other classical models
 features = ['Age', 'SysBP', 'Pulse']
 df = df[features].dropna().reset_index(drop=True)
 
-# Physiological thresholds (for Ground Truth)
+# Physiological thresholds
 THRESHOLDS = {
     "HR_tachy": 100, "HR_brady": 60,
     "SBP_high": 140, "SBP_low": 90
 }
 
-# Create ground truth array
-gt_array = np.zeros(len(df))
-
-# SBP rules
-gt_array[df["SysBP"] > THRESHOLDS["SBP_high"]] = 1
-gt_array[df["SysBP"] < THRESHOLDS["SBP_low"]] = 1
-
-# Pulse rules
-gt_array[df["Pulse"] > THRESHOLDS["HR_tachy"]] = 1
-gt_array[df["Pulse"] < THRESHOLDS["HR_brady"]] = 1
+# Ground truth
+gt = np.zeros(len(df))
+gt[df["SysBP"] > THRESHOLDS["SBP_high"]] = 1
+gt[df["SysBP"] < THRESHOLDS["SBP_low"]] = 1
+gt[df["Pulse"] > THRESHOLDS["HR_tachy"]] = 1
+gt[df["Pulse"] < THRESHOLDS["HR_brady"]] = 1
 
 # Standardize
 scaler = StandardScaler()
@@ -49,77 +48,99 @@ X_scaled = scaler.fit_transform(df)
 # 3️⃣ Train One-Class SVM
 # =========================
 svm = OneClassSVM(kernel='rbf', gamma='scale', nu=0.05)
-y_pred = svm.fit_predict(X_scaled)
+pred_raw = svm.fit_predict(X_scaled)
 
-# Convert prediction: -1 = anomaly, 1 = normal
-y_pred = np.where(y_pred == -1, 1, 0)
+y_pred_svm = np.where(pred_raw == -1, 1, 0)  # anomaly =1
 
-# =========================
-# 4️⃣ Calculate Evaluation Metrics
-# =========================
-scores = -svm.score_samples(X_scaled)
-
-try:
-    auc = roc_auc_score(gt_array, scores)
-except:
-    auc = np.nan
-
-precision = precision_score(gt_array, y_pred, zero_division=0)
-recall = recall_score(gt_array, y_pred, zero_division=0)
-f1 = f1_score(gt_array, y_pred, zero_division=0)
-
-cm = confusion_matrix(gt_array, y_pred)
-tn, fp, fn, tp = cm.ravel() if cm.size == 4 else (0,0,0,0)
-far = fp / (fp + tn) if (fp + tn) else 0
+# Scores
+scores = -svm.score_samples(X_scaled)  # higher = more anomalous
 
 # =========================
-# 5️⃣ Summary (UPDATED)
+# 4️⃣ MULTI-THRESHOLD EVALUATION (90 / 95 / 98)
 # =========================
-summary_text = (
-    f"=== One-Class SVM Anomaly Detection Summary ===\n"
-    f"Total samples: {len(df)}\n"
-    f"Detected anomalies: {y_pred.sum()}\n\n"
-    f"--- Evaluation Metrics ---\n"
-    f"AUC Score: {auc:.4f}\n"
-    f"Precision: {precision:.4f}\n"
-    f"Recall: {recall:.4f}\n"
-    f"F1-score: {f1:.4f}\n"
-    f"FAR (False Alarm Rate): {far:.4f}\n"
-)
+thresholds = [90, 95, 98]
+rows = []
+best_f1 = -1
+best_row = None
+best_threshold_value = None
+best_pred = None
 
-print("\n" + summary_text)
+for pct in thresholds:
+    thr = np.percentile(scores, pct)
+    y_pred = (scores >= thr).astype(int)
+
+    try:
+        auc = roc_auc_score(gt, scores)
+    except:
+        auc = np.nan
+
+    precision = precision_score(gt, y_pred, zero_division=0)
+    recall = recall_score(gt, y_pred, zero_division=0)
+    f1 = f1_score(gt, y_pred, zero_division=0)
+
+    tn, fp, fn, tp = confusion_matrix(gt, y_pred).ravel()
+    far = fp / (fp + tn) if (fp + tn) else 0
+
+    row = {
+        "Threshold(%)": pct,
+        "Threshold_Value": thr,
+        "AUC": auc,
+        "Precision": precision,
+        "Recall": recall,
+        "F1": f1,
+        "FAR": far,
+        "TP": tp,
+        "FP": fp,
+        "TN": tn,
+        "FN": fn,
+        "Detected_Anomalies": int(y_pred.sum())
+    }
+    rows.append(row)
+
+    if f1 > best_f1:
+        best_f1 = f1
+        best_row = row
+        best_threshold_value = thr
+        best_pred = y_pred.copy()
+
+# Save multi-threshold summary
+pd.DataFrame(rows).to_csv(multi_summary_csv, index=False)
+
+# Save best threshold summary
+pd.DataFrame([best_row]).to_csv(best_summary_csv, index=False)
+
+print("\n=== Multi-threshold Evaluation Complete ===")
+print(pd.DataFrame(rows))
+
+print("\n=== BEST THRESHOLD (based on F1) ===")
+print(best_row)
 
 # =========================
-# 6️⃣ Save results
+# 5️⃣ Save detailed results
 # =========================
 df_results = df.copy()
-df_results["Anomaly"] = y_pred
-df_results["Anomaly_Score"] = scores
-
-results_csv = os.path.join(results_dir, "OneClassSVM_Anomaly_Results.csv")
-summary_txt = os.path.join(results_dir, "OneClassSVM_Anomaly_Summary.txt")
-plot_path = os.path.join(results_dir, "OneClassSVM_Anomaly_Plot.png")
-
+df_results["Score"] = scores
+df_results["Predicted_Anomaly"] = best_pred
+df_results["GroundTruth"] = gt
 df_results.to_csv(results_csv, index=False)
-with open(summary_txt, "w") as f:
-    f.write(summary_text)
 
 # =========================
-# 7️⃣ Visualization
+# 6️⃣ Plot results with BEST threshold
 # =========================
-plt.figure(figsize=(8, 6))
-plt.scatter(df['SysBP'], df['Pulse'], c=y_pred, cmap='coolwarm', edgecolors='k')
-plt.xlabel("Systolic Blood Pressure (SysBP)")
+plt.figure(figsize=(10, 6))
+plt.scatter(df["SysBP"], df["Pulse"], c=best_pred, cmap="coolwarm", edgecolors="k")
+plt.title(f"One-Class SVM - Best Threshold = {best_row['Threshold(%)']}%")
+plt.xlabel("SysBP")
 plt.ylabel("Pulse")
-plt.title("One-Class SVM Anomaly Detection on ICU Data")
 plt.grid(True)
-plt.savefig(plot_path, dpi=300, bbox_inches='tight')
+plt.savefig(plot_path, dpi=300, bbox_inches="tight")
 plt.close()
 
 # =========================
-# 8️⃣ Done
+# 7️⃣ Done
 # =========================
-print(f"✅ One-Class SVM anomaly detection completed successfully.")
-print(f"   - Results: {results_csv}")
-print(f"   - Summary: {summary_txt}")
-print(f"   - Plot: {plot_path}")
+print("\nBEST threshold applied on plot + results saved!")
+print(f"Multi-threshold summary → {multi_summary_csv}")
+print(f"Best-threshold summary → {best_summary_csv}")
+print(f"Full results CSV → {results_csv}")
+print(f"Plot → {plot_path}")

@@ -1,2 +1,2 @@
-Total Records,Detected Anomalies,Anomaly %,Used Features,Contamination,Neighbors
-15551,778,5.0,"row_id, subject_id, hadm_id, icustay_id, itemid, cgid, time_diff_min",0.05,20
+Total Records,True Physiological Anomalies,Best Threshold,Best Threshold Value,AUC,Precision,Recall,F1,FAR,Predicted Anomalies,Features Used
+15551,3749,90%,31.95683096786123,0.7417059281107963,0.5430591259640103,0.22539343825020006,0.31856738925541944,0.06024402643619726,1556,"row_id, subject_id, hadm_id, icustay_id, itemid, cgid, time_diff_min"

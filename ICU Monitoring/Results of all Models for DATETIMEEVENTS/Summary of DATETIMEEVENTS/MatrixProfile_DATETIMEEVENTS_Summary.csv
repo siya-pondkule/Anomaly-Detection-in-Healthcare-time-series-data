@@ -1,2 +1,2 @@
-series_length,window_size,top_anomaly_index,discord_score
-15551,50,11232,7.059054707237891
+Total Records,Window Size,Total GT Anomalies (points),Total GT Anomalies (subseq aligned),Detected Anomalies (predicted_subseq_best),Anomaly Percentage (pred %),Best_Percentile,Best_Threshold,AUC_continuous,Precision_best,Recall_best,F1_best,FAR_best,Top_anomaly_subseq_start_index,Top_anomaly_score,GT_Labeling_Method
+15551,50,19,783,1553,10.018062,90,5.568305,0.131732,0.0,0.0,0.0,0.10551,11232,7.059055,time_gap_>mean+3std

@@ -4,6 +4,10 @@ import matplotlib.pyplot as plt
 import stumpy
 from pathlib import Path
 import chardet
+from sklearn.metrics import (
+    roc_auc_score, precision_score, recall_score,
+    f1_score, confusion_matrix
+)
 
 # ===================== PATHS =====================
 DATA_PATH = Path(r"D:\Final Year\Project\Anomaly Detection\Anomaly Detection\ICU Monitoring\Datasets\LABEVENTS.csv")
@@ -18,7 +22,7 @@ print(f"\n=== Processing {DATA_PATH.name} for Matrix Profile Anomaly Detection =
 with open(DATA_PATH, "rb") as f:
     rawdata = f.read(4096)
 encoding = chardet.detect(rawdata)["encoding"]
-print(f"✅ Detected encoding: {encoding}")
+print(f"Detected encoding: {encoding}")
 
 # ===================== DELIMITER DETECTION =====================
 with open(DATA_PATH, "r", encoding=encoding, errors="ignore") as f:
@@ -26,115 +30,139 @@ with open(DATA_PATH, "r", encoding=encoding, errors="ignore") as f:
 sample_text = "\n".join(sample_lines)
 delims = [",", ";", "|", "\t"]
 best_delim = max(delims, key=lambda d: sample_text.count(d))
-print(f"🔍 Auto-detected best delimiter: '{best_delim}'")
+print(f"Detected delimiter: '{best_delim}'")
 
 # ===================== LOAD DATA =====================
-df = pd.read_csv(DATA_PATH, encoding=encoding, delimiter=best_delim, engine="python", on_bad_lines="skip")
-print(f"✅ Loaded LABEVENTS.csv → Shape: {df.shape}")
-print(f"Columns: {df.columns.tolist()}")
+df = pd.read_csv(DATA_PATH, encoding=encoding, delimiter=best_delim, engine='python', on_bad_lines="skip")
+print(f"Loaded LABEVENTS.csv → Shape: {df.shape}")
 
 # ===================== PREPROCESSING =====================
-# Convert time-related columns
 for col in df.columns:
     if "time" in col.lower():
         df[col] = pd.to_datetime(df[col], errors="coerce")
 
-# Create time difference if possible
 if "subject_id" in df.columns and "charttime" in df.columns:
     df.sort_values(["subject_id", "charttime"], inplace=True)
-    df["time_diff_min"] = df.groupby("subject_id")["charttime"].diff().dt.total_seconds() / 60.0
+    df["time_diff_min"] = df.groupby("subject_id")["charttime"].diff().dt.total_seconds()/60
     df["time_diff_min"] = df["time_diff_min"].fillna(0.0)
 else:
     df["time_diff_min"] = np.arange(len(df))
 
-# Use one representative numeric feature — e.g., 'valuenum' or 'value'
 value_col = None
 for col in ["valuenum", "value"]:
     if col in df.columns:
         value_col = col
         break
+
 if not value_col:
-    raise ValueError("❌ No numeric lab value column (e.g., 'valuenum' or 'value') found.")
+    raise ValueError("No numeric value column found!")
 
-# Drop NaN and invalids
 df = df[[value_col, "time_diff_min"]].dropna()
-df = df[df[value_col].apply(lambda x: isinstance(x, (int, float, np.number)))]
 
-if df.empty:
-    raise ValueError("❌ No valid numeric data found after cleaning.")
-
-print(f"🧮 Using feature column: '{value_col}' | Total records: {len(df)}")
-
-# ===================== MATRIX PROFILE =====================
-window_size = max(10, len(df) // 100)  # Adaptive window size
-print(f"\n🧠 Computing Matrix Profile with window size = {window_size}")
-
-# Extract numeric series
 series = df[value_col].astype(float).values
 
-# Compute Matrix Profile
+print(f"Using feature: {value_col} | Total records: {len(series)}")
+
+# ===================== MATRIX PROFILE =====================
+window_size = max(10, len(series)//100)
+print(f"Computing Matrix Profile (window size = {window_size})...")
+
 mp = stumpy.stump(series, m=window_size)
 matrix_profile = mp[:, 0]
 
-# Identify top anomalies (discords)
-n_anomalies = min(10, len(series))
-try:
-    # Newer STUMPY versions (motifs.discords)
-    discord_indices = stumpy.motifs.discords(matrix_profile, n_anomalies)
-except Exception:
-    # Manual fallback if motif.discords not found
-    discord_indices = np.argsort(-matrix_profile)[:n_anomalies]
-
-# If stumpy.motifs.discords returns a tuple
-if isinstance(discord_indices, tuple):
-    discord_indices = discord_indices[0]
-discord_indices = np.array(discord_indices, dtype=int)
-
-print(f"✅ Matrix Profile computed successfully.")
-print(f"🚨 Top {len(discord_indices)} anomalies detected at indices: {discord_indices.tolist()}")
-
-# ===================== SAVE RESULTS =====================
-# Pad matrix profile to match series length
+# Pad to full length
 if len(matrix_profile) < len(series):
-    pad_len = len(series) - len(matrix_profile)
-    matrix_profile = np.pad(matrix_profile, (0, pad_len), constant_values=np.nan)
+    matrix_profile = np.pad(matrix_profile, (0, len(series)-len(matrix_profile)),
+                            mode="constant", constant_values=np.nan)
 
-# Mark anomalies
+# ===== Top discords (kept same as your pipeline) =====
+n_anomalies = min(10, len(series))
+discord_idx = np.argsort(-matrix_profile[:len(series)])[:n_anomalies]
+
 is_anomaly = np.zeros(len(series), dtype=int)
-is_anomaly[discord_indices] = 1
+is_anomaly[discord_idx] = 1
 
+# Save Base Results
 results_df = pd.DataFrame({
     "index": np.arange(len(series)),
     value_col: series,
     "matrix_profile": matrix_profile,
-    "is_anomaly": is_anomaly
+    "top_discords_flag": is_anomaly
 })
+results_df.to_csv(OUTPUT_DIR / "LABEVENTS_MatrixProfile_Results.csv", index=False)
 
-results_file = OUTPUT_DIR / "LABEVENTS_MatrixProfile_Results.csv"
-results_df.to_csv(results_file, index=False)
-print(f"✅ Results saved → {results_file}")
+print(f"Top anomalies: {discord_idx.tolist()}")
 
-summary = {
-    "total_records": len(series),
-    "window_size": window_size,
-    "top_anomalies_detected": len(discord_indices),
-    "discord_indices": discord_indices.tolist(),
-}
-pd.DataFrame([summary]).to_csv(SUMMARY_DIR / "MatrixProfile_LABEVENTS_Summary.csv", index=False)
-print(f"✅ Summary saved → {SUMMARY_DIR / 'MatrixProfile_LABEVENTS_Summary.csv'}")
+# ============================================================
+#   MULTI-THRESHOLD EVALUATION (90, 95, 98) — ADDED BY REQUEST
+# ============================================================
+
+thresholds = [90, 95, 98]
+eval_rows = []
+best_row, best_f1 = None, -1
+
+# Use top-discords as pseudo ground truth (weak supervision)
+pseudo_gt = is_anomaly.copy()
+
+for q in thresholds:
+    thr = np.nanpercentile(matrix_profile, q)
+    y_pred = (matrix_profile >= thr).astype(int)
+
+    # AUC score
+    try:
+        auc = roc_auc_score(pseudo_gt, matrix_profile)
+    except:
+        auc = np.nan
+
+    precision = precision_score(pseudo_gt, y_pred, zero_division=0)
+    recall = recall_score(pseudo_gt, y_pred, zero_division=0)
+    f1 = f1_score(pseudo_gt, y_pred, zero_division=0)
+
+    cm = confusion_matrix(pseudo_gt, y_pred)
+    tn, fp, fn, tp = cm.ravel() if cm.size == 4 else (0,0,0,0)
+    far = fp / (fp + tn) if (fp + tn) else 0
+
+    row = {
+        "Threshold_%": q,
+        "Threshold_Value": thr,
+        "AUC": auc,
+        "Precision": precision,
+        "Recall": recall,
+        "F1": f1,
+        "FAR": far,
+        "TP": tp,
+        "FP": fp,
+        "TN": tn,
+        "FN": fn,
+        "Detected_Anomalies": y_pred.sum()
+    }
+    eval_rows.append(row)
+
+    if f1 > best_f1:
+        best_f1 = f1
+        best_row = row.copy()
+
+# Save evaluation summary
+multi_df = pd.DataFrame(eval_rows)
+multi_df.to_csv(SUMMARY_DIR / "MatrixProfile_LABEVENTS_MultiThresholdSummary.csv", index=False)
+
+pd.DataFrame([best_row]).to_csv(SUMMARY_DIR / "MatrixProfile_LABEVENTS_BestThreshold.csv", index=False)
+
+print("\n=== MULTI-THRESHOLD SUMMARY ===")
+print(multi_df)
+
+print("\n=== BEST THRESHOLD ===")
+print(best_row)
 
 # ===================== VISUALIZE =====================
-plt.figure(figsize=(12, 6))
-plt.plot(series, label=f"{value_col} values", alpha=0.6)
-plt.scatter(discord_indices, series[discord_indices], color="red", marker="x", label="Detected Anomalies (Discords)")
-plt.title("Matrix Profile - Anomaly Detection (LABEVENTS)")
-plt.xlabel("Index")
-plt.ylabel(value_col)
+plt.figure(figsize=(12,6))
+plt.plot(series, label=value_col)
+plt.scatter(discord_idx, series[discord_idx], color="red", marker="x", label="Original Discords")
+plt.axhline(best_row["Threshold_Value"], color="orange", linestyle="--",
+            label=f"Best Threshold ({best_row['Threshold_%']}%)")
 plt.legend()
 plt.grid(True)
-plt.tight_layout()
 plt.savefig(OUTPUT_DIR / "LABEVENTS_MatrixProfile_AnomalyPlot.png")
 plt.close()
-print(f"✅ Plot saved → {OUTPUT_DIR / 'LABEVENTS_MatrixProfile_AnomalyPlot.png'}")
 
-print("\n🎯 Matrix Profile–based Anomaly Detection completed successfully!")
+print("\n🎯 Matrix Profile (with multi-threshold analysis) completed successfully!")

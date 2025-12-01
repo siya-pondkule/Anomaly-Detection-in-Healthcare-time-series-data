@@ -1,4 +1,4 @@
-index,valuenum,matrix_profile,is_anomaly
+index,valuenum,matrix_profile,top_discords_flag
 0,19.0,27.41330781343449,0
 1,27.0,27.429479014044073,0
 2,10.0,27.438455076678242,0

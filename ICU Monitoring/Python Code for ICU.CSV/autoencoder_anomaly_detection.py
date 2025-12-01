@@ -5,8 +5,7 @@ import matplotlib.pyplot as plt
 from sklearn.preprocessing import StandardScaler
 from tensorflow.keras import layers, models
 from sklearn.metrics import (
-    mean_squared_error, r2_score, roc_auc_score,
-    precision_score, recall_score, f1_score, confusion_matrix
+    roc_auc_score, precision_score, recall_score, f1_score, confusion_matrix
 )
 
 # ======================
@@ -14,12 +13,12 @@ from sklearn.metrics import (
 # ======================
 DATA_PATH = Path(r"D:\Final Year\Project\Anomaly Detection\Anomaly Detection\ICU Monitoring\ICU Datasets\ICU.csv")
 OUTPUT_DIR = Path(r"D:\Final Year\Project\Anomaly Detection\Anomaly Detection\ICU Monitoring\Results of all Models\Autoencoder-ModelResults")
-SUMMARY_DIR = OUTPUT_DIR.parent / "Summary"  
+SUMMARY_DIR = OUTPUT_DIR.parent / "Summary"
 OUTPUT_DIR.mkdir(exist_ok=True, parents=True)
 SUMMARY_DIR.mkdir(exist_ok=True, parents=True)
 
 # ======================
-# Thresholds for vital signs
+# Vital thresholds
 # ======================
 THRESHOLDS = {
     "HR_tachy": 100, "HR_brady": 60,
@@ -33,7 +32,7 @@ VITAL_MAPPING = {
 }
 
 # ======================
-# Detect Ground Truth Anomalies
+# Ground Truth Labeling
 # ======================
 def label_anomalies(series, col_name, gt_array, index_offset):
     series = pd.to_numeric(series, errors="coerce").dropna().reset_index(drop=True)
@@ -56,7 +55,6 @@ def label_anomalies(series, col_name, gt_array, index_offset):
 
     return anomalous_indices
 
-
 # ======================
 # Autoencoder Model
 # ======================
@@ -71,113 +69,138 @@ def build_autoencoder(input_dim):
     model.compile(optimizer='adam', loss='mse')
     return model
 
-
 # ======================
-# Evaluate Detection
+# Metric Calculation for Thresholds
 # ======================
-def evaluate_anomaly_detection(y_true, mse_scores):
+def compute_metrics(y_true, y_pred, mse_scores):
     try:
         auc = roc_auc_score(y_true, mse_scores)
-    except ValueError:
+    except:
         auc = np.nan
 
-    best_f1, best_threshold = 0, np.percentile(mse_scores, 90)
-    for q in np.linspace(90, 99.9, 100):
-        threshold = np.percentile(mse_scores, q)
-        y_pred = (mse_scores >= threshold).astype(int)
-        if np.sum(y_pred) > 0:
-            f1 = f1_score(y_true, y_pred, zero_division=0)
-            if f1 > best_f1:
-                best_f1 = f1
-                best_threshold = threshold
+    precision = precision_score(y_true, y_pred, zero_division=0)
+    recall = recall_score(y_true, y_pred, zero_division=0)
+    f1 = f1_score(y_true, y_pred, zero_division=0)
 
-    y_pred_best = (mse_scores >= best_threshold).astype(int)
-    cm = confusion_matrix(y_true, y_pred_best)
+    cm = confusion_matrix(y_true, y_pred)
     tn, fp, fn, tp = cm.ravel() if cm.size == 4 else (0, 0, 0, 0)
+    far = fp / (fp + tn) if (fp + tn) > 0 else 0
 
-    return {
-        "AUC": auc,
-        "F1": best_f1,
-        "Precision": precision_score(y_true, y_pred_best, zero_division=0),
-        "Recall": recall_score(y_true, y_pred_best, zero_division=0),
-        "FAR": fp / (fp + tn) if (fp + tn) > 0 else 0,
-        "Threshold": best_threshold
-    }
-
+    return precision, recall, f1, auc, far, tn, fp, fn, tp
 
 # ======================
-# Main Processing
+# Load Data
 # ======================
 print(f"\n=== Processing {DATA_PATH.name} ===")
 df = pd.read_csv(DATA_PATH)
-df = df[["SysBP", "Pulse"]]
-df = df.dropna().reset_index(drop=True)
+df = df[["SysBP", "Pulse"]].dropna().reset_index(drop=True)
 
+# ======================
 # Ground Truth
+# ======================
 gt_array = np.zeros(len(df))
 for col in df.columns:
     label_anomalies(df[col], col, gt_array, 0)
 
-# Scale data
+# ======================
+# Scale Data
+# ======================
 scaler = StandardScaler()
 X_scaled = scaler.fit_transform(df)
 input_dim = X_scaled.shape[1]
 
+# ======================
 # Train Autoencoder
+# ======================
 autoencoder = build_autoencoder(input_dim)
 history = autoencoder.fit(
-    X_scaled, X_scaled, epochs=50, batch_size=32,
+    X_scaled, X_scaled,
+    epochs=50, batch_size=32,
     validation_split=0.1, verbose=0
 )
 
-# Reconstruction
-reconstructions = autoencoder.predict(X_scaled)
-mse_scores = np.mean((X_scaled - reconstructions)**2, axis=1)
+# ======================
+# Reconstruction Errors
+# ======================
+recon = autoencoder.predict(X_scaled)
+mse_scores = np.mean((X_scaled - recon)**2, axis=1)
 
-# Evaluation
-eval_results = evaluate_anomaly_detection(gt_array, mse_scores)
+# ======================
+# Evaluate at fixed thresholds 90/95/98
+# ======================
+thresholds = [90, 95, 98]
+threshold_results = []
+best_f1 = -1
+best_row = None
 
-print("\nAutoencoder Evaluation:")
-print(eval_results)
+for pct in thresholds:
+    thr = np.percentile(mse_scores, pct)
+    y_pred = (mse_scores >= thr).astype(int)
+    y_true = gt_array.copy()
 
-# Save corrected data
-df_corrected = pd.DataFrame(scaler.inverse_transform(reconstructions), columns=df.columns)
+    precision, recall, f1, auc, far, tn, fp, fn, tp = compute_metrics(y_true, y_pred, mse_scores)
+
+    row = {
+        "Percentile": pct,
+        "Threshold_Value": thr,
+        "AUC": auc,
+        "Precision": precision,
+        "Recall": recall,
+        "F1": f1,
+        "FAR": far,
+        "GT_Anomalies": int(y_true.sum()),
+        "Predicted_Anomalies": int(y_pred.sum()),
+        "TP": tp, "FP": fp, "TN": tn, "FN": fn
+    }
+    threshold_results.append(row)
+
+    # Select best threshold (based on F1)
+    if f1 > best_f1:
+        best_f1 = f1
+        best_row = row
+
+# ======================
+# Save Threshold Comparison
+# ======================
+th_df = pd.DataFrame(threshold_results)
+th_df.to_csv(SUMMARY_DIR / "Autoencoder_ICU_Thresholds_90_95_98.csv", index=False)
+
+# ======================
+# Save Best Threshold
+# ======================
+pd.DataFrame([best_row]).to_csv(SUMMARY_DIR / "Autoencoder_ICU_BestThreshold.csv", index=False)
+
+print("\n=== BEST THRESHOLD (among 90/95/98) ===")
+print(best_row)
+
+# ======================
+# Corrected data save
+# ======================
+df_corrected = pd.DataFrame(scaler.inverse_transform(recon), columns=df.columns)
 df_corrected.to_csv(OUTPUT_DIR / "ICU_corrected.csv", index=False)
 
 # ======================
-# SUMMARY CSV (UPDATED)
+# Plot MSE with thresholds
 # ======================
-summary_df = pd.DataFrame([{
-    "Dataset": "ICU.csv",
-    "Model": "Autoencoder",
-    "AUC": eval_results["AUC"],
-    "F1": eval_results["F1"],
-    "Precision": eval_results["Precision"],
-    "Recall": eval_results["Recall"],
-    "FAR": eval_results["FAR"]
-}])
+plt.figure(figsize=(12,6))
+plt.plot(mse_scores, label="Reconstruction Error")
 
-summary_df.to_csv(SUMMARY_DIR / "Autoencoder_anomaly_summary.csv", index=False)
+for pct in thresholds:
+    thr = np.percentile(mse_scores, pct)
+    plt.axhline(thr, linestyle="--", label=f"{pct}th = {thr:.4f}")
 
-print(f"\nSummary Saved → {SUMMARY_DIR/'Autoencoder_anomaly_summary.csv'}")
+# Mark anomalies from BEST threshold
+best_thr = best_row["Threshold_Value"]
+best_pred = (mse_scores >= best_thr).astype(int)
+plt.scatter(np.where(best_pred==1)[0], mse_scores[best_pred==1], c="red", marker="x", label="Anomalies")
 
-# ======================
-# Plot
-# ======================
-plt.figure(figsize=(12, 6))
-plt.plot(df["SysBP"], label="SysBP (Original)", alpha=0.7)
-plt.plot(df_corrected["SysBP"], label="SysBP (Reconstructed)", alpha=0.9)
-
-plt.plot(df["Pulse"], label="Pulse (Original)", alpha=0.7)
-plt.plot(df_corrected["Pulse"], label="Pulse (Reconstructed)", alpha=0.9)
-
-plt.title("ICU Anomaly Detection (SysBP & Pulse)")
+plt.title("Autoencoder ICU Anomaly Detection\n(Threshold Evaluation 90/95/98)")
 plt.xlabel("Index")
-plt.ylabel("Value")
+plt.ylabel("MSE")
 plt.legend()
 plt.grid(True)
 plt.tight_layout()
-plt.savefig(OUTPUT_DIR / "ICU_anomaly_plot.png")
+plt.savefig(OUTPUT_DIR / "ICU_Autoencoder_Thresholds_Plot.png")
 plt.close()
 
 print("\nProcess Completed Successfully!")

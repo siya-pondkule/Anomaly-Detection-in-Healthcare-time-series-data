@@ -1,0 +1,2 @@
+Total Sequences,Detected Anomalies (Predicted),Anomaly Percentage Predicted (%),Sequence Length,Threshold (BEST chosen),Threshold_Name,AUC,Precision,Recall,F1,FAR
+15541,63,2.026,10,0.004165298635777531,98%,0.9190344942787939,0.15873015873015872,0.2564102564102564,0.19607843137254902,0.01726384364820847

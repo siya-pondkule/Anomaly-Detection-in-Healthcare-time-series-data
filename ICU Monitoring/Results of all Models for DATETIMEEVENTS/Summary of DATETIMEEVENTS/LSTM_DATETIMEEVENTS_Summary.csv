@@ -1,2 +1,2 @@
-Total Sequences,Detected Anomalies,Anomaly Percentage (%),Sequence Length,Threshold (95th Percentile)
-15541,777,5.0,10,0.000992
+Total Sequences,Best Threshold,Best Threshold Value,Detected Anomalies,AUC,Precision,Recall,F1,FAR
+15541,90%,0.00039744835384992306,1554,1.0,1.0,1.0,1.0,0.0

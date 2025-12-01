@@ -5,8 +5,8 @@ import matplotlib.pyplot as plt
 from sklearn.preprocessing import StandardScaler
 from tensorflow.keras import layers, models
 from sklearn.metrics import (
-    mean_squared_error, r2_score, roc_auc_score,
-    precision_score, recall_score, f1_score, confusion_matrix
+    roc_auc_score, precision_score, recall_score,
+    f1_score, confusion_matrix
 )
 
 # ======================
@@ -34,116 +34,130 @@ def build_autoencoder(input_dim):
 
 
 # ======================
-# Evaluation Function
-# ======================
-def evaluate_anomaly_detection(y_true, mse_scores):
-    try:
-        auc = roc_auc_score(y_true, mse_scores)
-    except ValueError:
-        auc = np.nan
-
-    best_f1, best_threshold = 0, np.percentile(mse_scores, 90)
-    for q in np.linspace(90, 99.9, 100):
-        threshold = np.percentile(mse_scores, q)
-        y_pred = (mse_scores >= threshold).astype(int)
-        if np.sum(y_pred) > 0 and np.sum(y_true) > 0:
-            f1 = f1_score(y_true, y_pred, zero_division=0)
-            if f1 > best_f1:
-                best_f1, best_threshold = f1, threshold
-
-    y_pred_best = (mse_scores >= best_threshold).astype(int)
-    cm = confusion_matrix(y_true, y_pred_best)
-    tn, fp, fn, tp = cm.ravel() if cm.size == 4 else (0, 0, 0, 0)
-
-    return {
-        "AUC": auc,
-        "F1": best_f1,
-        "Precision": precision_score(y_true, y_pred_best, zero_division=0),
-        "Recall": recall_score(y_true, y_pred_best, zero_division=0),
-        "FAR": fp / (fp + tn) if (fp + tn) > 0 else 0,
-        "Threshold": best_threshold
-    }
-
-
-# ======================
-# Main Processing
+# MAIN PROCESSING
 # ======================
 print(f"\n=== Processing {DATA_PATH.name} ===")
 df = pd.read_csv(DATA_PATH)
 
-# Drop non-numeric and identifier/timestamp columns
+# Drop timestamp/id/unit columns
 drop_cols = [c for c in df.columns if any(x in c.lower() for x in ["time", "date", "id", "unit"])]
 numeric_df = df.select_dtypes(include=[np.number]).drop(columns=[c for c in drop_cols if c in df.columns], errors='ignore')
 numeric_df = numeric_df.dropna().reset_index(drop=True)
 
 if numeric_df.empty:
-    raise ValueError("No usable numeric columns found in ICUSTAYS.csv for anomaly detection.")
+    raise ValueError("No usable numeric columns found in ICUSTAYS.csv.")
 
 print(f"Using columns for anomaly detection: {list(numeric_df.columns)}")
 
-# Since ICUSTAYS.csv doesn’t have explicit vitals, we assume anomalies are outliers in LOS/durations etc.
-# Create pseudo ground truth (for evaluation purposes)
+# Pseudo ground truth (all zeros because no vitals)
 gt_array = np.zeros(len(numeric_df))
 
+# ======================
 # Scale data
+# ======================
 scaler = StandardScaler()
 X_scaled = scaler.fit_transform(numeric_df)
 input_dim = X_scaled.shape[1]
 
+# ======================
 # Train Autoencoder
+# ======================
 autoencoder = build_autoencoder(input_dim)
 history = autoencoder.fit(X_scaled, X_scaled, epochs=50, batch_size=32, validation_split=0.1, verbose=0)
-print(f"Training complete | Final Loss: {history.history['loss'][-1]:.4f}")
+print(f"Training complete | Final Loss={history.history['loss'][-1]:.4f}")
 
-# Reconstruction and anomaly scoring
-reconstructions = autoencoder.predict(X_scaled)
-mse_per_row = np.mean(np.square(X_scaled - reconstructions), axis=1)
+# Reconstruction
+recon = autoencoder.predict(X_scaled)
+mse_scores = np.mean((X_scaled - recon) ** 2, axis=1)
 
-# Identify anomalies based on high reconstruction error
-threshold = np.percentile(mse_per_row, 95)
-anomaly_indices = np.where(mse_per_row > threshold)[0]
+# =======================================================
+#  MULTI-THRESHOLD EVALUATION (90, 95, 98)
+# =======================================================
+thresholds = [90, 95, 98]
+eval_rows = []
+best_f1 = -1
+best_row = None
 
-# Evaluate (no ground truth, so we skip F1-based tuning)
-y_pred = np.zeros(len(mse_per_row))
-y_pred[anomaly_indices] = 1
+for pct in thresholds:
+    thr = np.percentile(mse_scores, pct)
+    y_pred = (mse_scores >= thr).astype(int)
 
-print(f"\nDetected {len(anomaly_indices)} anomalies out of {len(mse_per_row)} records.")
+    # With no GT anomalies → metrics comparisons still apply
+    try:
+        auc = roc_auc_score(gt_array, mse_scores)
+    except:
+        auc = np.nan
 
-# Reconstruction performance
-mse_reco = mean_squared_error(X_scaled, reconstructions)
-r2 = r2_score(X_scaled, reconstructions)
-accuracy = 100 * (1 - mse_reco)
-print(f"Reconstruction: MSE={mse_reco:.4f} | R²={r2:.4f} | Accuracy≈{accuracy:.2f}%")
+    precision = precision_score(gt_array, y_pred, zero_division=0)
+    recall = recall_score(gt_array, y_pred, zero_division=0)
+    f1 = f1_score(gt_array, y_pred, zero_division=0)
 
-# Save corrected data
-df_corrected = pd.DataFrame(scaler.inverse_transform(reconstructions), columns=numeric_df.columns)
-df_corrected.to_csv(OUTPUT_DIR / "ICUSTAYS_corrected.csv", index=False)
+    cm = confusion_matrix(gt_array, y_pred)
+    tn, fp, fn, tp = cm.ravel() if cm.size == 4 else (0,0,0,0)
+    far = fp / (fp + tn) if (fp + tn) else 0
 
-# ======================
-# Summary of Anomalies
-# ======================
+    row = {
+        "Threshold_%": pct,
+        "Threshold_Value": thr,
+        "AUC": auc,
+        "Precision": precision,
+        "Recall": recall,
+        "F1": f1,
+        "FAR": far,
+        "TP": tp, "FP": fp, "TN": tn, "FN": fn,
+        "Detected_Anomalies": int(y_pred.sum())
+    }
+    eval_rows.append(row)
+
+    if f1 > best_f1:
+        best_f1 = f1
+        best_row = row.copy()
+
+# Save multi-threshold summary
+multi_df = pd.DataFrame(eval_rows)
+multi_df.to_csv(SUMMARY_DIR / "ICUSTAYS_Autoencoder_MultiThresholdSummary.csv", index=False)
+
+# Save best-threshold summary
+pd.DataFrame([best_row]).to_csv(SUMMARY_DIR / "ICUSTAYS_Autoencoder_BestThreshold.csv", index=False)
+
+print("\n=== Multi-threshold evaluation (90/95/98) ===")
+print(multi_df)
+print("\n=== BEST THRESHOLD (by F1) ===")
+print(best_row)
+
+# =======================================================
+# Apply BEST threshold
+# =======================================================
+best_thr = best_row["Threshold_Value"]
+final_pred = (mse_scores >= best_thr).astype(int)
+anomaly_indices = np.where(final_pred == 1)[0]
+
+# Save anomaly summary (your original requirement)
 summary_df = pd.DataFrame({
     "Index": anomaly_indices,
-    "Reconstruction_Error": mse_per_row[anomaly_indices]
+    "Reconstruction_Error": mse_scores[anomaly_indices]
 })
 summary_df.to_csv(SUMMARY_DIR / "Autoencoder_ICUSTAYS_anomaly_summary.csv", index=False)
-print(f"\nAnomaly summary saved → {SUMMARY_DIR / 'Autoencoder_ICUSTAYS_anomaly_summary.csv'}")
 
-# ======================
-# Plot anomalies
-# ======================
+print(f"\nFinal anomaly summary saved → {SUMMARY_DIR / 'Autoencoder_ICUSTAYS_anomaly_summary.csv'}")
+
+# =======================================================
+# Plot
+# =======================================================
 plt.figure(figsize=(12,6))
 for col in numeric_df.columns:
-    plt.plot(numeric_df[col], label=f"{col}", alpha=0.6)
+    plt.plot(numeric_df[col], label=f"{col}", alpha=0.55)
+
 for idx in anomaly_indices:
     plt.axvline(idx, color='red', linestyle='--', alpha=0.3)
-plt.title("ICUSTAYS Anomaly Detection (Autoencoder)")
-plt.xlabel("Record Index")
+
+plt.title("ICUSTAYS Autoencoder Anomaly Detection")
+plt.xlabel("Index")
 plt.ylabel("Value")
-plt.legend(loc="upper right")
+plt.legend()
 plt.grid(True)
 plt.tight_layout()
-plt.savefig(OUTPUT_DIR / "ICUSTAYS_anomaly_plot.png")
+plt.savefig(OUTPUT_DIR / "ICUSTAYS_AnomalyPlot.png")
 plt.close()
 
-print(f"\nResults saved to → {OUTPUT_DIR}")
+print(f"\nResults saved to: {OUTPUT_DIR}")

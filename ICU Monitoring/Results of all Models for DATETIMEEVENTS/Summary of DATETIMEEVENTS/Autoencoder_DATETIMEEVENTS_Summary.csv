@@ -1,2 +1,2 @@
-Total Records,Detected Anomalies,Anomaly Percentage (%),Input Features,Latent Dimension,Threshold (95th Percentile)
-71,4,5.63,3,2,6.011152
+Total Records,Detected Anomalies (Predicted),Anomaly Percentage (Predicted %),GT Anomalies (Rule-Based),Input Features,Latent Dimension,Threshold (95th Percentile MSE),AUC,Precision,Recall,F1,FAR
+71,4,5.63,8,3,2,3.8136161262309436,0.998015873015873,1.0,0.5,0.6666666666666666,0.0

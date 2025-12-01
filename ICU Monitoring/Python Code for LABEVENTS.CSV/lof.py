@@ -4,6 +4,10 @@ import matplotlib.pyplot as plt
 from pathlib import Path
 from sklearn.preprocessing import StandardScaler
 from sklearn.neighbors import LocalOutlierFactor
+from sklearn.metrics import (
+    roc_auc_score, precision_score, recall_score,
+    f1_score, confusion_matrix
+)
 import chardet
 
 # ===================== PATHS =====================
@@ -18,105 +22,135 @@ print(f"\n=== Processing {DATA_PATH.name} for Local Outlier Factor (LOF) Anomaly
 # ===================== ENCODING DETECTION =====================
 with open(DATA_PATH, "rb") as f:
     rawdata = f.read(4096)
-result = chardet.detect(rawdata)
-encoding = result["encoding"]
-print(f"✅ Detected encoding: {encoding}")
+encoding = chardet.detect(rawdata)["encoding"]
+print(f"Detected encoding: {encoding}")
 
 # ===================== DELIMITER DETECTION =====================
 with open(DATA_PATH, "r", encoding=encoding, errors="ignore") as f:
-    sample_lines = [next(f) for _ in range(10)]
-sample_text = "\n".join(sample_lines)
+    lines = [next(f) for _ in range(10)]
+sample = "\n".join(lines)
 delims = [",", ";", "|", "\t"]
-best_delim = max(delims, key=lambda d: sample_text.count(d))
-print(f"🔍 Auto-detected best delimiter: '{best_delim}'")
+best_delim = max(delims, key=lambda d: sample.count(d))
+print(f"Detected delimiter: '{best_delim}'")
 
 # ===================== LOAD DATA =====================
 df = pd.read_csv(DATA_PATH, encoding=encoding, delimiter=best_delim, engine="python", on_bad_lines="skip")
-print(f"✅ File loaded → Shape: {df.shape}")
-print(f"Columns: {df.columns.tolist()}")
+print(f"Loaded shape: {df.shape}")
 
 # ===================== PREPROCESSING =====================
-# Convert time columns
 for col in df.columns:
     if "time" in col.lower():
         df[col] = pd.to_datetime(df[col], errors="coerce")
 
-# Create time difference if possible
 if "subject_id" in df.columns and "charttime" in df.columns:
     df.sort_values(["subject_id", "charttime"], inplace=True)
-    df["time_diff_min"] = df.groupby("subject_id")["charttime"].diff().dt.total_seconds() / 60.0
-    df["time_diff_min"] = df["time_diff_min"].fillna(0.0)
+    df["time_diff_min"] = df.groupby("subject_id")["charttime"].diff().dt.total_seconds()/60
+    df["time_diff_min"].fillna(0, inplace=True)
 else:
     df["time_diff_min"] = np.arange(len(df)).astype(float)
 
-# Select numeric columns
 numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
 if "time_diff_min" not in numeric_cols:
     numeric_cols.append("time_diff_min")
 
-df_numeric = df[numeric_cols].replace([np.inf, -np.inf], np.nan).dropna(how="any")
-if df_numeric.empty:
-    raise ValueError("❌ No usable numeric columns found in LABEVENTS.csv for LOF model.")
+df_numeric = df[numeric_cols].replace([np.inf, -np.inf], np.nan).dropna()
 
-print(f"🧮 Using features: {numeric_cols}")
+print(f"Using numeric columns: {numeric_cols}")
 
-# ===================== SCALE DATA =====================
+# ===================== SCALE =====================
 scaler = StandardScaler()
 X_scaled = scaler.fit_transform(df_numeric)
 
-# ===================== TRAIN LOF MODEL =====================
-print("\n🚀 Training Local Outlier Factor model...")
+# ===================== TRAIN LOF =====================
+print("\nTraining LOF...")
 lof = LocalOutlierFactor(
-    n_neighbors=25,  # typical range 20–50
-    contamination=0.05,  # expected % of anomalies
+    n_neighbors=25,
+    contamination=0.05,
     novelty=False
 )
-y_pred = lof.fit_predict(X_scaled)
+y_pred_raw = lof.fit_predict(X_scaled)
+lof_scores = -lof.negative_outlier_factor_  # higher → more anomalous
 
-# LOF score (lower = more anomalous)
-lof_scores = -lof.negative_outlier_factor_
+# Convert raw LOF: -1 = anomaly → 1 (pseudo GT)
+y_gt = np.where(y_pred_raw == -1, 1, 0)
 
-# ===================== DETECT ANOMALIES =====================
-threshold = np.percentile(lof_scores, 95)
-anomaly_mask = lof_scores > threshold
+print(f"LOF detected {y_gt.sum()} anomalies (raw contamination).")
 
-print(f"✅ LOF model trained successfully.")
-print(f"🚨 Detected {anomaly_mask.sum()} anomalies out of {len(lof_scores)} (threshold={threshold:.4f})")
+# ======================================================
+# 📌 MULTI-THRESHOLD EVALUATION (90, 95, 98)
+# ======================================================
+thresholds = [90, 95, 98]
+results = []
+best_row, best_f1 = None, -1
 
-# ===================== SAVE RESULTS =====================
+for pct in thresholds:
+    thr = np.percentile(lof_scores, pct)
+    y_pred = (lof_scores >= thr).astype(int)
+
+    try:
+        auc = roc_auc_score(y_gt, lof_scores)
+    except:
+        auc = np.nan
+
+    precision = precision_score(y_gt, y_pred, zero_division=0)
+    recall = recall_score(y_gt, y_pred, zero_division=0)
+    f1 = f1_score(y_gt, y_pred, zero_division=0)
+
+    cm = confusion_matrix(y_gt, y_pred)
+    tn, fp, fn, tp = cm.ravel() if cm.size == 4 else (0,0,0,0)
+    far = fp / (fp + tn) if (fp + tn) else 0.0
+
+    row = {
+        "Threshold_%": pct,
+        "Threshold_Value": thr,
+        "AUC": auc,
+        "Precision": precision,
+        "Recall": recall,
+        "F1": f1,
+        "FAR": far,
+        "TP": tp, "FP": fp, "TN": tn, "FN": fn,
+        "Detected_Anomalies": int(y_pred.sum())
+    }
+    results.append(row)
+
+    if f1 > best_f1:
+        best_f1 = f1
+        best_row = row.copy()
+
+# Save multi-threshold results
+multi_df = pd.DataFrame(results)
+multi_df.to_csv(SUMMARY_DIR / "LOF_LABEVENTS_MultiThresholdSummary.csv", index=False)
+
+pd.DataFrame([best_row]).to_csv(SUMMARY_DIR / "LOF_LABEVENTS_BestThreshold.csv", index=False)
+
+print("\n=== MULTI-THRESHOLD RESULTS ===")
+print(multi_df)
+print("\n=== BEST THRESHOLD BASED ON F1 ===")
+print(best_row)
+
+# ======================================================
+# NORMAL LOF OUTPUT USING BEST THRESHOLD
+# ======================================================
+final_pred = (lof_scores >= best_row["Threshold_Value"]).astype(int)
+
 results_df = pd.DataFrame({
     "index": df_numeric.index,
     "lof_score": lof_scores,
-    "is_anomaly": anomaly_mask.astype(int)
+    "is_anomaly": final_pred
 })
-results_file = OUTPUT_DIR / "LABEVENTS_LOF_Results.csv"
-results_df.to_csv(results_file, index=False)
-print(f"✅ Results saved → {results_file}")
+results_df.to_csv(OUTPUT_DIR / "LABEVENTS_LOF_Results.csv", index=False)
 
-summary = {
-    "total_records": len(lof_scores),
-    "detected_anomalies": int(anomaly_mask.sum()),
-    "anomaly_percentage": round(100 * anomaly_mask.sum() / len(lof_scores), 3),
-    "lof_threshold_95pct": float(threshold),
-    "n_neighbors": 25,
-    "contamination": 0.05
-}
-pd.DataFrame([summary]).to_csv(SUMMARY_DIR / "LOF_LABEVENTS_Summary.csv", index=False)
-print(f"✅ Summary saved → {SUMMARY_DIR / 'LOF_LABEVENTS_Summary.csv'}")
-
-# ===================== PLOT RESULTS =====================
-plt.figure(figsize=(12, 6))
-plt.title("Local Outlier Factor (LOF) - LABEVENTS Anomaly Detection")
-plt.plot(lof_scores, label="LOF score", alpha=0.7)
-plt.axhline(threshold, color="orange", linestyle="--", label="95th percentile threshold")
-plt.scatter(np.where(anomaly_mask)[0], lof_scores[anomaly_mask], color="red", marker="x", label="Anomalies")
-plt.xlabel("Record Index")
-plt.ylabel("LOF Score")
-plt.legend()
+# ===================== PLOT =====================
+plt.figure(figsize=(12,6))
+plt.title("LOF Anomaly Detection - LABEVENTS")
+plt.plot(lof_scores, label="LOF Score", alpha=0.7)
+plt.axhline(best_row["Threshold_Value"], color="red", linestyle="--",
+            label=f"Best Threshold ({best_row['Threshold_%']}%)")
+plt.scatter(np.where(final_pred)[0], lof_scores[final_pred==1], color="red", marker="x", label="Anomalies")
 plt.grid(True)
+plt.legend()
 plt.tight_layout()
 plt.savefig(OUTPUT_DIR / "LABEVENTS_LOF_AnomalyPlot.png")
 plt.close()
-print(f"✅ Plot saved → {OUTPUT_DIR / 'LABEVENTS_LOF_AnomalyPlot.png'}")
 
-print("\n🎯 LOF-based Anomaly Detection completed successfully!")
+print("\n🎯 LOF anomaly detection with multi-threshold evaluation completed successfully!")

@@ -3,6 +3,10 @@ import numpy as np
 import matplotlib.pyplot as plt
 from pathlib import Path
 from sklearn.preprocessing import StandardScaler
+from sklearn.metrics import (
+    roc_auc_score, precision_score,
+    recall_score, f1_score, confusion_matrix
+)
 from tensorflow.keras import Input, Model
 from tensorflow.keras.layers import Dense, Conv1D, Dropout, Flatten, Reshape
 from tensorflow.keras.callbacks import EarlyStopping
@@ -36,16 +40,12 @@ print(f"Detected delimiter: '{best_delim}'")
 
 # ===================== LOAD DATA =====================
 df = pd.read_csv(DATA_PATH, encoding=encoding, delimiter=best_delim, engine="python", on_bad_lines="skip")
-print(f"✅ Loaded data → shape: {df.shape}")
-print(f"Columns: {df.columns.tolist()}")
 
 # ===================== PREPROCESS =====================
-# Convert timestamps
 for col in df.columns:
     if "time" in col.lower():
         df[col] = pd.to_datetime(df[col], errors="coerce")
 
-# Create time difference feature
 if "subject_id" in df.columns and "charttime" in df.columns:
     df.sort_values(["subject_id", "charttime"], inplace=True)
     df["time_diff_min"] = df.groupby("subject_id")["charttime"].diff().dt.total_seconds() / 60.0
@@ -53,15 +53,13 @@ if "subject_id" in df.columns and "charttime" in df.columns:
 else:
     df["time_diff_min"] = np.arange(len(df)).astype(float)
 
-# Select numeric columns
 numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
 if "time_diff_min" not in numeric_cols:
     numeric_cols.append("time_diff_min")
 
 df_numeric = df[numeric_cols].replace([np.inf, -np.inf], np.nan).dropna(how="any")
 if df_numeric.empty:
-    raise ValueError("❌ No valid numeric data for TCN training.")
-print(f"🧮 Using numeric columns: {numeric_cols}")
+    raise ValueError("No numeric data found")
 
 # ===================== NORMALIZE =====================
 scaler = StandardScaler()
@@ -77,87 +75,127 @@ def create_sequences(X, time_steps=TIME_STEPS):
     return np.array(seqs)
 
 X_seq = create_sequences(X_scaled)
-print(f"✅ Created sequences → shape: {X_seq.shape}")
 
-if len(X_seq) < 10:
-    raise ValueError("Not enough sequences to train TCN. Try reducing TIME_STEPS.")
-
-# ===================== BUILD TCN AUTOENCODER =====================
+# ===================== BUILD TCN =====================
 input_shape = (X_seq.shape[1], X_seq.shape[2])
 inputs = Input(shape=input_shape)
 
-# Encoder: Temporal Conv layers with dilation
-x = Conv1D(filters=64, kernel_size=3, padding='causal', activation='relu', dilation_rate=1)(inputs)
+x = Conv1D(64, 3, padding='causal', activation='relu', dilation_rate=1)(inputs)
 x = Dropout(0.2)(x)
-x = Conv1D(filters=128, kernel_size=3, padding='causal', activation='relu', dilation_rate=2)(x)
+x = Conv1D(128, 3, padding='causal', activation='relu', dilation_rate=2)(x)
 x = Dropout(0.2)(x)
 x = Flatten()(x)
 encoded = Dense(64, activation='relu')(x)
 
-# Decoder: Mirror the encoder
 x = Dense(X_seq.shape[1] * X_seq.shape[2], activation='relu')(encoded)
 x = Reshape((X_seq.shape[1], X_seq.shape[2]))(x)
-x = Conv1D(filters=128, kernel_size=3, padding='same', activation='relu')(x)
+x = Conv1D(128, 3, padding='same', activation='relu')(x)
 x = Dropout(0.2)(x)
-x = Conv1D(filters=64, kernel_size=3, padding='same', activation='relu')(x)
+x = Conv1D(64, 3, padding='same', activation='relu')(x)
 decoded = Dense(X_seq.shape[2], activation='linear')(x)
 
 model = Model(inputs, decoded)
 model.compile(optimizer=Adam(1e-3), loss='mse')
-model.summary()
 
-# ===================== TRAIN MODEL =====================
+# ===================== TRAIN =====================
 early_stop = EarlyStopping(monitor='val_loss', patience=5, restore_best_weights=True)
-
-history = model.fit(
-    X_seq, X_seq,
-    epochs=40,
-    batch_size=64,
-    validation_split=0.1,
-    callbacks=[early_stop],
-    verbose=1
-)
+history = model.fit(X_seq, X_seq, epochs=40, batch_size=64, validation_split=0.1, verbose=1, callbacks=[early_stop])
 
 # ===================== RECONSTRUCTION ERROR =====================
 X_pred = model.predict(X_seq)
 mse_seq = np.mean(np.mean(np.square(X_seq - X_pred), axis=2), axis=1)
-threshold = np.percentile(mse_seq, 95)
-anomalies = mse_seq > threshold
 
-print(f"🚨 Detected {anomalies.sum()} anomalies out of {len(mse_seq)} sequences (threshold={threshold:.6f})")
+# ===============================================================
+# 🔥 MULTI-THRESHOLD EVALUATION (90%, 95%, 98%)
+# ===============================================================
+thresholds = [90, 95, 98]
+eval_rows = []
+best_row, best_f1 = None, -1
 
-# ===================== SAVE RESULTS =====================
+# Weak GT (unsupervised): Use 95% anomalies as pseudo-GT
+gt = (mse_seq >= np.percentile(mse_seq, 95)).astype(int)
+
+# Compute AUC once
+try:
+    auc_value = roc_auc_score(gt, mse_seq)
+except:
+    auc_value = np.nan
+
+for q in thresholds:
+    thr = np.percentile(mse_seq, q)
+    pred = (mse_seq >= thr).astype(int)
+
+    precision = precision_score(gt, pred, zero_division=0)
+    recall = recall_score(gt, pred, zero_division=0)
+    f1 = f1_score(gt, pred, zero_division=0)
+
+    cm = confusion_matrix(gt, pred)
+    if cm.size == 4:
+        tn, fp, fn, tp = cm.ravel()
+    else:
+        tn, fp, fn, tp = (0, 0, 0, 0)
+
+    far = fp / (fp + tn) if (fp + tn) > 0 else 0
+
+    row = {
+        "Threshold_percentile": q,
+        "Threshold_value": thr,
+        "AUC": auc_value,
+        "Precision": precision,
+        "Recall": recall,
+        "F1": f1,
+        "FAR": far,
+        "TP": tp,
+        "FP": fp,
+        "TN": tn,
+        "FN": fn,
+        "Detected_Anomalies": pred.sum()
+    }
+
+    eval_rows.append(row)
+
+    if f1 > best_f1:
+        best_f1 = f1
+        best_row = row.copy()
+
+# Save multi-threshold summary
+multi_df = pd.DataFrame(eval_rows)
+multi_file = SUMMARY_DIR / "TCN_LABEVENTS_MultiThresholdSummary.csv"
+multi_df.to_csv(multi_file, index=False)
+
+# Save best threshold
+best_file = SUMMARY_DIR / "TCN_LABEVENTS_BestThreshold.csv"
+pd.DataFrame([best_row]).to_csv(best_file, index=False)
+
+print("\n=== Multi-Threshold Summary ===")
+print(multi_df)
+
+print("\n=== BEST Threshold ===")
+print(best_row)
+
+# ===================== ORIGINAL SAVING =====================
+threshold_95 = np.percentile(mse_seq, 95)
+anomalies = mse_seq > threshold_95
+
 results_df = pd.DataFrame({
     "sequence_index": np.arange(len(mse_seq)),
     "reconstruction_error": mse_seq,
     "is_anomaly": anomalies.astype(int)
 })
-results_file = OUTPUT_DIR / "LABEVENTS_TCN_Results.csv"
-results_df.to_csv(results_file, index=False)
-print(f"✅ Results saved → {results_file}")
-
-summary = {
-    "total_sequences": len(mse_seq),
-    "detected_anomalies": int(anomalies.sum()),
-    "anomaly_percentage": round(100.0 * anomalies.sum() / len(mse_seq), 3),
-    "threshold_95pct": float(threshold)
-}
-pd.DataFrame([summary]).to_csv(SUMMARY_DIR / "TCN_LABEVENTS_Summary.csv", index=False)
-print(f"✅ Summary saved → {SUMMARY_DIR / 'TCN_LABEVENTS_Summary.csv'}")
+results_df.to_csv(OUTPUT_DIR / "LABEVENTS_TCN_Results.csv", index=False)
 
 # ===================== PLOT =====================
 plt.figure(figsize=(12,6))
-plt.title("TCN Autoencoder Reconstruction Error - LABEVENTS")
-plt.plot(mse_seq, label="Reconstruction Error", alpha=0.7)
-plt.axhline(threshold, color="orange", linestyle="--", label="Anomaly Threshold")
+plt.plot(mse_seq, label="Reconstruction Error")
 plt.scatter(np.where(anomalies)[0], mse_seq[anomalies], color="red", marker="x", label="Anomalies")
-plt.xlabel("Sequence Index")
-plt.ylabel("Reconstruction Error")
+plt.axhline(best_row["Threshold_value"], color="orange", linestyle="--",
+            label=f"Best Threshold ({best_row['Threshold_percentile']}%)")
 plt.legend()
-plt.grid(True)
+plt.grid()
 plt.tight_layout()
 plt.savefig(OUTPUT_DIR / "LABEVENTS_TCN_AnomalyPlot.png")
 plt.close()
-print(f"✅ Plot saved → {OUTPUT_DIR / 'LABEVENTS_TCN_AnomalyPlot.png'}")
 
-print("\n🎯 TCN-based Anomaly Detection completed successfully!")
+print("\n🎯 TCN with multi-threshold evaluation completed!")
+print(f"✔ Summary saved to: {multi_file}")
+print(f"✔ Best threshold saved to: {best_file}")

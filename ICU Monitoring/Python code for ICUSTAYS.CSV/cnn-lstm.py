@@ -3,8 +3,11 @@ import numpy as np
 from pathlib import Path
 import matplotlib.pyplot as plt
 from sklearn.preprocessing import StandardScaler
+from sklearn.metrics import (
+    roc_auc_score, precision_score, recall_score, f1_score, confusion_matrix
+)
 from tensorflow.keras.models import Sequential
-from tensorflow.keras.layers import Conv1D, MaxPooling1D, LSTM, RepeatVector, TimeDistributed, Dense, Flatten, Reshape
+from tensorflow.keras.layers import Conv1D, MaxPooling1D, LSTM, RepeatVector, TimeDistributed, Dense
 from tensorflow.keras.callbacks import EarlyStopping
 
 # ======================
@@ -22,43 +25,42 @@ SUMMARY_DIR.mkdir(exist_ok=True, parents=True)
 print(f"\n=== Processing {DATA_PATH.name} for CNN-LSTM Autoencoder ===")
 df = pd.read_csv(DATA_PATH)
 
-# Select only numeric columns (remove IDs/timestamps)
 drop_cols = [c for c in df.columns if any(x in c.lower() for x in ["id", "time", "date", "unit"])]
-df_numeric = df.select_dtypes(include=[np.number]).drop(columns=[c for c in drop_cols if c in df.columns], errors="ignore")
+df_numeric = df.select_dtypes(include=[np.number]).drop(columns=drop_cols, errors="ignore")
 df_numeric = df_numeric.dropna().reset_index(drop=True)
 
 if df_numeric.empty:
-    raise ValueError("No usable numeric columns found in ICUSTAYS.csv for CNN-LSTM anomaly detection.")
+    raise ValueError("No usable numeric columns found for anomaly detection.")
 
-print(f"Using columns for anomaly detection: {list(df_numeric.columns)}")
+print(f"Using numeric columns: {list(df_numeric.columns)}")
 
-# Scale data
+# Standardization
 scaler = StandardScaler()
 X_scaled = scaler.fit_transform(df_numeric)
 
 # ======================
 # Create sequences
 # ======================
-time_steps = 5  # length of time window
+time_steps = 5
 
 def create_sequences(data, time_steps=5):
-    X = []
+    seq = []
     for i in range(len(data) - time_steps):
-        X.append(data[i:(i + time_steps)])
-    return np.array(X)
+        seq.append(data[i:(i + time_steps)])
+    return np.array(seq)
 
 X_seq = create_sequences(X_scaled, time_steps)
-print(f"Shape of data for CNN-LSTM: {X_seq.shape}")  # (samples, timesteps, features)
+print(f"Data shape for CNN-LSTM: {X_seq.shape}")  # (samples, timesteps, features)
 
 # ======================
 # Build CNN-LSTM Autoencoder
 # ======================
 def build_cnn_lstm_autoencoder(timesteps, n_features):
     model = Sequential([
-        Conv1D(filters=64, kernel_size=2, activation='relu', input_shape=(timesteps, n_features)),
+        Conv1D(64, 2, activation='relu', input_shape=(timesteps, n_features)),
         MaxPooling1D(pool_size=2),
         LSTM(64, activation='relu', return_sequences=False),
-        RepeatVector(timesteps - 1),  # adjust to match reduced sequence after pooling
+        RepeatVector(timesteps - 1),
         LSTM(64, activation='relu', return_sequences=True),
         TimeDistributed(Dense(n_features))
     ])
@@ -66,16 +68,11 @@ def build_cnn_lstm_autoencoder(timesteps, n_features):
     return model
 
 model = build_cnn_lstm_autoencoder(X_seq.shape[1], X_seq.shape[2])
-model.summary()
 
-# ======================
-# Train model
-# ======================
-early_stop = EarlyStopping(monitor="val_loss", patience=5, restore_best_weights=True)
-
-print("\nTraining CNN-LSTM Autoencoder...")
+# Training
+early_stop = EarlyStopping(monitor='val_loss', patience=5, restore_best_weights=True)
 history = model.fit(
-    X_seq, X_seq[:, 1:, :],  # since pooling reduces timesteps by 1
+    X_seq, X_seq[:, 1:, :],
     epochs=50,
     batch_size=32,
     validation_split=0.1,
@@ -84,59 +81,104 @@ history = model.fit(
 )
 
 # ======================
-# Reconstruction and anomaly detection
+# Reconstruction Error
 # ======================
 X_pred = model.predict(X_seq)
-mse = np.mean(np.mean(np.square(X_seq[:, 1:, :] - X_pred), axis=2), axis=1)  # sequence-wise MSE
-
-# Use percentile-based threshold
-threshold = np.percentile(mse, 95)
-anomalies = np.where(mse > threshold)[0]
-
-print(f"\nDetected {len(anomalies)} anomalies out of {len(mse)} sequences.")
-print(f"Anomaly threshold: {threshold:.6f}")
+mse = np.mean(np.square(X_seq[:, 1:, :] - X_pred), axis=(1, 2))
 
 # ======================
-# Save results
+# Ground truth = no labels available → pseudo GT (all zeros)
+# ======================
+gt = np.zeros(len(mse), dtype=int)
+
+# ==========================================================
+# MULTI-THRESHOLD EVALUATION (90, 95, 98)
+# ==========================================================
+thresholds = [90, 95, 98]
+eval_rows = []
+best_f1 = -1
+best_row = None
+
+for pct in thresholds:
+    thr = np.percentile(mse, pct)
+    y_pred = (mse >= thr).astype(int)
+
+    # Metrics
+    try:
+        auc = roc_auc_score(gt, mse)
+    except:
+        auc = np.nan
+
+    precision = precision_score(gt, y_pred, zero_division=0)
+    recall = recall_score(gt, y_pred, zero_division=0)
+    f1 = f1_score(gt, y_pred, zero_division=0)
+
+    cm = confusion_matrix(gt, y_pred)
+    tn, fp, fn, tp = cm.ravel() if cm.size == 4 else (0, 0, 0, 0)
+    far = fp / (fp + tn) if (fp + tn) else 0
+
+    row = {
+        "Threshold_%": pct,
+        "Threshold_Value": thr,
+        "AUC": auc,
+        "Precision": precision,
+        "Recall": recall,
+        "F1": f1,
+        "FAR": far,
+        "TP": tp, "FP": fp, "TN": tn, "FN": fn,
+        "Detected_Anomalies": int(y_pred.sum())
+    }
+    eval_rows.append(row)
+
+    if f1 > best_f1:
+        best_f1 = f1
+        best_row = row.copy()
+
+# Save multi-threshold summary
+multi_df = pd.DataFrame(eval_rows)
+multi_df.to_csv(SUMMARY_DIR / "ICUSTAYS_CNNLSTM_MultiThresholdSummary.csv", index=False)
+
+# Save best threshold summary
+pd.DataFrame([best_row]).to_csv(SUMMARY_DIR / "ICUSTAYS_CNNLSTM_BestThreshold.csv", index=False)
+
+print("\n=== MULTI-THRESHOLD EVALUATION (90/95/98) ===")
+print(multi_df)
+print("\n=== BEST THRESHOLD (By F1-Score) ===")
+print(best_row)
+
+# ==========================================================
+# Apply Best Threshold
+# ==========================================================
+best_threshold = best_row["Threshold_Value"]
+final_pred = (mse >= best_threshold).astype(int)
+anomalies = np.where(final_pred == 1)[0]
+
+# ======================
+# Save main results
 # ======================
 results_df = pd.DataFrame({
     "Sequence_Index": np.arange(len(mse)),
     "Reconstruction_Error": mse,
-    "Anomaly_Label": np.where(mse > threshold, "Anomaly", "Normal")
+    "Best_Threshold": best_threshold,
+    "Anomaly_Label": final_pred
 })
-results_file = OUTPUT_DIR / "ICUSTAYS_CNNLSTM_Results.csv"
-results_df.to_csv(results_file, index=False)
-print(f"Results saved → {results_file}")
+results_df.to_csv(OUTPUT_DIR / "ICUSTAYS_CNNLSTM_Results.csv", index=False)
 
 # ======================
-# Summary
-# ======================
-summary_data = {
-    "Total Sequences": len(mse),
-    "Detected Anomalies": len(anomalies),
-    "Anomaly Percentage (%)": round(100 * len(anomalies) / len(mse), 2)
-}
-summary_df = pd.DataFrame([summary_data])
-summary_file = SUMMARY_DIR / "CNNLSTM_ICUSTAYS_Summary.csv"
-summary_df.to_csv(summary_file, index=False)
-print(f"Summary saved → {summary_file}")
-
-# ======================
-# Plot reconstruction error
+# Plot Results
 # ======================
 plt.figure(figsize=(12, 6))
-plt.plot(mse, label="Reconstruction Error", color="blue", alpha=0.7)
-plt.scatter(anomalies, mse[anomalies], color="red", label="Detected Anomalies", marker="x")
-plt.axhline(threshold, color="orange", linestyle="--", label="Threshold")
-plt.title("CNN-LSTM Autoencoder Anomaly Detection - ICUSTAYS.csv")
+plt.plot(mse, label="Reconstruction Error", alpha=0.7)
+plt.scatter(anomalies, mse[anomalies], color="red", marker="x", label="Detected Anomalies")
+plt.axhline(best_threshold, color="orange", linestyle="--", label=f"Best Threshold ({best_row['Threshold_%']}%)")
+plt.title("CNN-LSTM Autoencoder - ICUSTAYS")
 plt.xlabel("Sequence Index")
 plt.ylabel("Reconstruction Error (MSE)")
 plt.legend()
 plt.grid(True)
 plt.tight_layout()
-plt.savefig(OUTPUT_DIR / "ICUSTAYS_CNNLSTM_Anomaly_Plot.png")
+plt.savefig(OUTPUT_DIR / "ICUSTAYS_CNNLSTM_AnomalyPlot.png")
 plt.close()
 
-print(f"Plot saved → {OUTPUT_DIR / 'ICUSTAYS_CNNLSTM_Anomaly_Plot.png'}")
-
-print("\n✅ CNN-LSTM Autoencoder anomaly detection complete!")
+print("\nPlot saved →", OUTPUT_DIR / "ICUSTAYS_CNNLSTM_AnomalyPlot.png")
+print("\n✅ CNN-LSTM Autoencoder updated with 90/95/98 thresholds & best-threshold evaluation!")

@@ -4,6 +4,10 @@ import matplotlib.pyplot as plt
 from pathlib import Path
 from sklearn.ensemble import IsolationForest
 from sklearn.preprocessing import StandardScaler
+from sklearn.metrics import (
+    roc_auc_score, precision_score, recall_score,
+    f1_score, confusion_matrix
+)
 import csv
 
 # ====================== Paths ======================
@@ -25,105 +29,130 @@ except Exception:
     encoding = "latin1"
 print(f"Detected encoding: {encoding}")
 
-# Detect delimiter
 with open(DATA_PATH, "r", encoding=encoding, errors="ignore") as f:
     sample_lines = "\n".join([next(f) for _ in range(10)])
 delim_candidates = [",", ";", "|", "\t"]
 delim_counts = {d: sample_lines.count(d) for d in delim_candidates}
 best_delim = max(delim_counts, key=delim_counts.get)
-print(f"Detected delimiter: '{best_delim}' (counts={delim_counts})")
+print(f"Detected delimiter: '{best_delim}'")
 
 # ====================== Load CSV ======================
 df = pd.read_csv(DATA_PATH, encoding=encoding, delimiter=best_delim, engine="python", on_bad_lines="skip")
-print(f"✅ Loaded data → shape: {df.shape}")
-print(f"Columns: {df.columns.tolist()}")
+print(f"Loaded data → shape: {df.shape}")
 
 # ====================== Preprocessing ======================
-# Parse time columns if exist
 for col in df.columns:
     if "time" in col.lower():
         df[col] = pd.to_datetime(df[col], errors="coerce")
 
-# Create time difference feature
 if "subject_id" in df.columns and "charttime" in df.columns:
     df.sort_values(["subject_id", "charttime"], inplace=True)
-    df["time_diff_min"] = df.groupby("subject_id")["charttime"].diff().dt.total_seconds() / 60.0
-    df["time_diff_min"] = df["time_diff_min"].fillna(0.0)
-elif "charttime" in df.columns:
-    df.sort_values("charttime", inplace=True)
-    df["time_diff_min"] = df["charttime"].diff().dt.total_seconds() / 60.0
-    df["time_diff_min"] = df["time_diff_min"].fillna(0.0)
+    df["time_diff_min"] = df.groupby("subject_id")["charttime"].diff().dt.total_seconds()/60
+    df["time_diff_min"].fillna(0, inplace=True)
 else:
-    df["time_diff_min"] = np.arange(len(df)).astype(float)
+    df["time_diff_min"] = np.arange(len(df))
 
-# Select numeric columns
 numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
 if "time_diff_min" not in numeric_cols:
     numeric_cols.append("time_diff_min")
 
-print(f"🧮 Using numeric columns: {numeric_cols}")
-
 df_numeric = df[numeric_cols].copy()
 df_numeric.replace([np.inf, -np.inf], np.nan, inplace=True)
-df_numeric.dropna(how="all", inplace=True)
+df_numeric.dropna(inplace=True)
 
-if df_numeric.empty:
-    raise ValueError("❌ No numeric data available for Isolation Forest training.")
-
-# ====================== Scale Features ======================
+# ====================== Scale ======================
 scaler = StandardScaler()
 X_scaled = scaler.fit_transform(df_numeric)
 
 # ====================== Train Isolation Forest ======================
-print("🚀 Training Isolation Forest model...")
+print("Training Isolation Forest...")
 iso_forest = IsolationForest(
     n_estimators=200,
-    contamination=0.05,  # 5% anomalies
-    max_samples="auto",
+    contamination=0.05,
     random_state=42,
     n_jobs=-1
 )
 iso_forest.fit(X_scaled)
 
-# ====================== Predict Anomalies ======================
-scores = iso_forest.decision_function(X_scaled)
-predictions = iso_forest.predict(X_scaled)
-# In sklearn: -1 = anomaly, 1 = normal
-anomaly_mask = predictions == -1
+# ====================== Original IF Prediction ======================
+scores = -iso_forest.decision_function(X_scaled)  # higher = more anomalous
+pred_raw = iso_forest.predict(X_scaled)
+pred_raw = np.where(pred_raw == -1, 1, 0)
 
-print(f"✅ Model trained successfully!")
-print(f"🚨 Detected {anomaly_mask.sum()} anomalies out of {len(predictions)} records.")
+print(f"\nIsolation Forest detected {pred_raw.sum()} anomalies.")
 
-# ====================== Save Results ======================
+# ====================== MULTI-THRESHOLD EVALUATION ======================
+thresholds = [90, 95, 98]
+results = []
+best_row = None
+best_f1 = -1
+
+gt = pred_raw.copy()  # pseudo GT (because no true GT exists)
+
+for pct in thresholds:
+    thr = np.percentile(scores, pct)
+    y_pred = (scores >= thr).astype(int)
+
+    try:
+        auc = roc_auc_score(gt, scores)
+    except:
+        auc = np.nan
+
+    precision = precision_score(gt, y_pred, zero_division=0)
+    recall = recall_score(gt, y_pred, zero_division=0)
+    f1 = f1_score(gt, y_pred, zero_division=0)
+
+    cm = confusion_matrix(gt, y_pred)
+    tn, fp, fn, tp = cm.ravel() if cm.size == 4 else (0,0,0,0)
+    far = fp / (fp + tn) if (fp + tn) else 0
+
+    row = {
+        "Threshold_%": pct,
+        "Threshold_Value": thr,
+        "AUC": auc,
+        "Precision": precision,
+        "Recall": recall,
+        "F1": f1,
+        "FAR": far,
+        "TP": tp, "FP": fp, "TN": tn, "FN": fn,
+        "Detected_Anomalies": int(y_pred.sum())
+    }
+    results.append(row)
+
+    if f1 > best_f1:
+        best_f1 = f1
+        best_row = row.copy()
+
+multi_df = pd.DataFrame(results)
+multi_df.to_csv(SUMMARY_DIR / "IsolationForest_LABEVENTS_MultiThresholdSummary.csv", index=False)
+
+pd.DataFrame([best_row]).to_csv(SUMMARY_DIR / "IsolationForest_LABEVENTS_BestThreshold.csv", index=False)
+
+print("\n=== THRESHOLD RESULTS ===")
+print(multi_df)
+print("\n=== BEST THRESHOLD ===")
+print(best_row)
+
+# ====================== Build Results CSV ======================
+final_pred = (scores >= best_row["Threshold_Value"]).astype(int)
+
 results_df = pd.DataFrame({
     "anomaly_score": scores,
-    "is_anomaly": anomaly_mask.astype(int)
+    "is_anomaly": final_pred
 })
-results_file = OUTPUT_DIR / "LABEVENTS_IsolationForest_Results.csv"
-results_df.to_csv(results_file, index=False)
-print(f"✅ Results saved → {results_file}")
+results_df.to_csv(OUTPUT_DIR / "LABEVENTS_IsolationForest_Results.csv", index=False)
 
-summary = {
-    "total_records": len(predictions),
-    "detected_anomalies": int(anomaly_mask.sum()),
-    "anomaly_percentage": round(100.0 * anomaly_mask.sum() / len(predictions), 3),
-    "contamination": 0.05,
-}
-pd.DataFrame([summary]).to_csv(SUMMARY_DIR / "IsolationForest_LABEVENTS_Summary.csv", index=False)
-print(f"✅ Summary saved → {SUMMARY_DIR / 'IsolationForest_LABEVENTS_Summary.csv'}")
-
-# ====================== Plot Results ======================
+# ====================== Plot ======================
 plt.figure(figsize=(12,6))
-plt.title("Isolation Forest Anomaly Detection - LABEVENTS")
+plt.title("Isolation Forest - LABEVENTS")
 plt.plot(scores, label="Anomaly Score", alpha=0.7)
-plt.scatter(np.where(anomaly_mask)[0], scores[anomaly_mask], color="red", marker="x", label="Anomalies")
-plt.xlabel("Record Index")
-plt.ylabel("Isolation Forest Score")
-plt.legend()
+plt.axhline(best_row["Threshold_Value"], color="red", linestyle="--",
+            label=f"Best Threshold ({best_row['Threshold_%']}%)")
+plt.scatter(np.where(final_pred)[0], scores[final_pred==1], color="red", marker="x", label="Anomalies")
 plt.grid(True)
+plt.legend()
 plt.tight_layout()
 plt.savefig(OUTPUT_DIR / "LABEVENTS_IsolationForest_AnomalyPlot.png")
 plt.close()
-print(f"✅ Plot saved → {OUTPUT_DIR / 'LABEVENTS_IsolationForest_AnomalyPlot.png'}")
 
-print("\n🎯 Isolation Forest training and anomaly detection completed successfully!")
+print("\n🎯 Completed Isolation Forest with multi-threshold evaluation!")

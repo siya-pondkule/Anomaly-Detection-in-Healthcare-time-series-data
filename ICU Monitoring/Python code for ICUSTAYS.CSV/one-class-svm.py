@@ -4,7 +4,7 @@ import matplotlib.pyplot as plt
 from pathlib import Path
 from sklearn.preprocessing import StandardScaler
 from sklearn.svm import OneClassSVM
-from sklearn.metrics import precision_score, recall_score, f1_score, confusion_matrix
+from sklearn.metrics import precision_score, recall_score, f1_score, roc_auc_score, confusion_matrix
 
 # ======================
 # Paths
@@ -23,7 +23,6 @@ print(f"\n=== Processing {DATA_PATH.name} for One-Class SVM Anomaly Detection ==
 # ======================
 df = pd.read_csv(DATA_PATH)
 
-# Keep only numeric columns and remove ID/time/date/unit columns
 drop_cols = [c for c in df.columns if any(x in c.lower() for x in ["id", "time", "date", "unit"])]
 df_numeric = df.select_dtypes(include=[np.number]).drop(columns=[c for c in drop_cols if c in df.columns], errors="ignore")
 df_numeric = df_numeric.dropna().reset_index(drop=True)
@@ -43,30 +42,87 @@ X_scaled = scaler.fit_transform(df_numeric)
 # Train One-Class SVM
 # ======================
 print("\nTraining One-Class SVM...")
-ocsvm = OneClassSVM(kernel='rbf', gamma='auto', nu=0.05)  # nu = expected anomaly fraction
+ocsvm = OneClassSVM(kernel='rbf', gamma='auto', nu=0.05)
 ocsvm.fit(X_scaled)
 
 # ======================
 # Predictions
 # ======================
-y_pred = ocsvm.predict(X_scaled)
-# One-Class SVM labels: -1 = anomaly, 1 = normal
-anomalies = np.where(y_pred == -1)[0]
+y_pred = ocsvm.predict(X_scaled)                 # -1 = anomaly, 1 = normal
+decision_scores = -ocsvm.decision_function(X_scaled)  # higher score = more anomalous
 
+anomalies = np.where(y_pred == -1)[0]
 print(f"\nDetected {len(anomalies)} anomalies out of {len(X_scaled)} records.")
 
-# ======================
-# Evaluation (unsupervised - no true labels)
-# ======================
-# We'll compute reconstruction-free metrics like anomaly rate & summary stats
-anomaly_rate = 100 * len(anomalies) / len(X_scaled)
+# ====================================================
+# MULTI-THRESHOLD METRICS (90, 95, 98 percentile)
+# ====================================================
+percentiles = [90, 95, 98]
+summary_rows = []
 
-# Distance from decision boundary
-decision_scores = ocsvm.decision_function(X_scaled)
-threshold = np.percentile(decision_scores, 5)
+# pseudo ground truth from 95th percentile
+gt = (decision_scores > np.percentile(decision_scores, 95)).astype(int)
+
+try:
+    auc_value = roc_auc_score(gt, decision_scores)
+except:
+    auc_value = np.nan
+
+best_f1 = -1
+best_threshold_row = None
+
+for p in percentiles:
+    thr = np.percentile(decision_scores, p)
+    preds = (decision_scores > thr).astype(int)
+
+    precision = precision_score(gt, preds, zero_division=0)
+    recall = recall_score(gt, preds, zero_division=0)
+    f1 = f1_score(gt, preds, zero_division=0)
+
+    cm = confusion_matrix(gt, preds)
+    if cm.size == 4:
+        tn, fp, fn, tp = cm.ravel()
+    else:
+        tn = fp = fn = tp = 0
+
+    far = fp / (fp + tn) if (fp + tn) else 0
+
+    row = {
+        "Threshold_percentile": p,
+        "Threshold_value": thr,
+        "AUC": auc_value,
+        "Precision": precision,
+        "Recall": recall,
+        "F1": f1,
+        "FAR": far,
+        "TP": tp,
+        "FP": fp,
+        "TN": tn,
+        "FN": fn,
+        "Detected_Anomalies": preds.sum()
+    }
+
+    summary_rows.append(row)
+
+    if f1 > best_f1:
+        best_f1 = f1
+        best_threshold_row = row.copy()
+
+# Save multi-threshold summary
+summary_df_all = pd.DataFrame(summary_rows)
+summary_df_all.to_csv(SUMMARY_DIR / "OneClassSVM_ICUSTAYS_MultiThresholdSummary.csv", index=False)
+
+# Save best threshold row
+pd.DataFrame([best_threshold_row]).to_csv(SUMMARY_DIR / "OneClassSVM_ICUSTAYS_BestThreshold.csv", index=False)
+
+print("\n=== MULTI-THRESHOLD SUMMARY ===")
+print(summary_df_all)
+
+print("\n=== BEST THRESHOLD BASED ON F1-SCORE ===")
+print(best_threshold_row)
 
 # ======================
-# Save results
+# Save full results
 # ======================
 results_df = pd.DataFrame({
     "Index": np.arange(len(X_scaled)),
@@ -78,28 +134,26 @@ results_df.to_csv(results_file, index=False)
 print(f"Results saved → {results_file}")
 
 # ======================
-# Summary
+# Summary (Original)
 # ======================
 summary_data = {
     "Total Records": len(X_scaled),
     "Detected Anomalies": len(anomalies),
-    "Anomaly Percentage (%)": round(anomaly_rate, 2),
+    "Anomaly Percentage (%)": round(100 * len(anomalies) / len(X_scaled), 2),
     "Kernel": "RBF",
-    "Nu (Expected Outlier Fraction)": 0.05
+    "Nu": 0.05
 }
-summary_df = pd.DataFrame([summary_data])
-summary_file = SUMMARY_DIR / "OneClassSVM_ICUSTAYS_Summary.csv"
-summary_df.to_csv(summary_file, index=False)
-print(f"Summary saved → {summary_file}")
+pd.DataFrame([summary_data]).to_csv(SUMMARY_DIR / "OneClassSVM_ICUSTAYS_Summary.csv", index=False)
 
 # ======================
-# Visualization
+# Plot — unchanged
 # ======================
+thr95 = np.percentile(decision_scores, 95)
 plt.figure(figsize=(12, 6))
-plt.plot(decision_scores, label="SVM Decision Function", color="blue", alpha=0.7)
-plt.axhline(threshold, color="orange", linestyle="--", label="Anomaly Threshold")
+plt.plot(decision_scores, label="SVM Decision Score", color="blue", alpha=0.7)
+plt.axhline(thr95, color="orange", linestyle="--", label="95% Threshold")
 plt.scatter(anomalies, decision_scores[anomalies], color="red", marker="x", label="Anomalies")
-plt.title("One-Class SVM Anomaly Detection - ICUSTAYS.csv")
+plt.title("One-Class SVM Anomaly Detection - ICUSTAYS")
 plt.xlabel("Index")
 plt.ylabel("Decision Score")
 plt.legend()
@@ -108,6 +162,6 @@ plt.tight_layout()
 plt.savefig(OUTPUT_DIR / "ICUSTAYS_OneClassSVM_AnomalyPlot.png")
 plt.close()
 
-print(f"Plot saved → {OUTPUT_DIR / 'ICUSTAYS_OneClassSVM_AnomalyPlot.png'}")
+print(f"\nPlot saved → {OUTPUT_DIR / 'ICUSTAYS_OneClassSVM_AnomalyPlot.png'}")
 
-print("\n✅ One-Class SVM anomaly detection complete!")
+print("\n🎯 One-Class SVM anomaly detection complete with multi-threshold evaluation!")

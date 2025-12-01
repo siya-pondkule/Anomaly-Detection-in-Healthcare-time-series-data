@@ -1,2 +1,2 @@
-Total Records,Detected Anomalies,Anomaly Percentage (%),Input Features,Sequence Length,Threshold (95th %ile)
-15541,0,0.0,14,10,
+Total Samples,Detected Anomalies,True Anomalies,AUC,Precision,Recall,F1-score,FAR,Threshold,Features Used
+15541,0,0,,0.0,0.0,0.0,0,,"row_id, subject_id, hadm_id, icustay_id, itemid, cgid, warning, error, resultstatus, time_diff_min"

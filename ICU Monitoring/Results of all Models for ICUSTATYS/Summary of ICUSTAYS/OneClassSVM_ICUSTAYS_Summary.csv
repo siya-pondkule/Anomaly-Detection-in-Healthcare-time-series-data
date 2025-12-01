@@ -1,2 +1,2 @@
-Total Records,Detected Anomalies,Anomaly Percentage (%),Kernel,Nu (Expected Outlier Fraction)
+Total Records,Detected Anomalies,Anomaly Percentage (%),Kernel,Nu
 136,7,5.15,RBF,0.05

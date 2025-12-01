@@ -19,9 +19,9 @@ SUMMARY_DIR = BASE_OUTPUT_DIR / "Summary of Admission"
 OUTPUT_DIR.mkdir(exist_ok=True, parents=True)
 SUMMARY_DIR.mkdir(exist_ok=True, parents=True)
 
+
 # ======================
-# Data Preprocessing and Feature Engineering
-# (Reused from Autoencoder script)
+# Preprocessing Function
 # ======================
 def preprocess_admissions(df):
     df['admittime'] = pd.to_datetime(df['admittime'])
@@ -29,57 +29,42 @@ def preprocess_admissions(df):
     df['LOS_hours'] = (df['dischtime'] - df['admittime']).dt.total_seconds() / 3600
     
     features_df = df[['LOS_hours', 'admission_type', 'discharge_location', 'ethnicity']].copy()
-    
-    features_df = pd.get_dummies(
-        features_df, 
-        columns=['admission_type', 'discharge_location', 'ethnicity'], 
-        drop_first=True
-    )
+    features_df = pd.get_dummies(features_df, 
+                                 columns=['admission_type', 'discharge_location', 'ethnicity'], 
+                                 drop_first=True)
     
     features_df['LOS_hours'].fillna(features_df['LOS_hours'].mean(), inplace=True)
     
     y_true = df['hospital_expire_flag'].values
-    
     return features_df, y_true
 
 
 # ======================
-# Evaluation Function (Same as Autoencoder)
+# Compute metrics for a given threshold
 # ======================
-def evaluate_anomaly_detection(y_true, anomaly_scores):
+def compute_metrics(y_true, scores, threshold):
+    y_pred = (scores >= threshold).astype(int)
+
     try:
-        auc = roc_auc_score(y_true, anomaly_scores)
-    except ValueError:
+        auc = roc_auc_score(y_true, scores)
+    except:
         auc = np.nan
 
-    best_f1, best_threshold = 0, np.percentile(anomaly_scores, 90)
-    
-    if np.sum(y_true) == 0:
-        return {
-            "AUC": auc, "F1": np.nan, "Precision": np.nan, 
-            "Recall": np.nan, "FAR": np.nan, "Threshold": best_threshold
-        }
-
-    for q in np.linspace(90, 99.9, 100):
-        threshold = np.percentile(anomaly_scores, q)
-        y_pred = (anomaly_scores >= threshold).astype(int)
-        
-        if np.sum(y_pred) > 0:
-            f1 = f1_score(y_true, y_pred, zero_division=0)
-            if f1 > best_f1:
-                best_f1, best_threshold = f1, threshold
-    
-    y_pred_best = (anomaly_scores >= best_threshold).astype(int)
-    cm = confusion_matrix(y_true, y_pred_best)
+    cm = confusion_matrix(y_true, y_pred)
     tn, fp, fn, tp = cm.ravel() if cm.size == 4 else (0, 0, 0, 0)
 
+    precision = precision_score(y_true, y_pred, zero_division=0)
+    recall = recall_score(y_true, y_pred, zero_division=0)
+    f1 = f1_score(y_true, y_pred, zero_division=0)
+    far = fp / (fp + tn) if (fp + tn) > 0 else 0
+
     return {
+        "Threshold": threshold,
         "AUC": auc,
-        "F1": best_f1,
-        "Precision": precision_score(y_true, y_pred_best, zero_division=0),
-        "Recall": recall_score(y_true, y_pred_best, zero_division=0),
-        "FAR": fp / (fp + tn) if (fp + tn) > 0 else 0,
-        "Threshold": best_threshold
+        "Precision": precision,
+        "Recall": recall,
+        "F1": f1,
+        "FAR": far
     }
 
 
@@ -89,77 +74,93 @@ def evaluate_anomaly_detection(y_true, anomaly_scores):
 if __name__ == "__main__":
     print(f"\n=== Running {MODEL_NAME} on ADMISSIONS.csv ===")
     
-    # Load and Preprocess Data
     df_raw = pd.read_csv(DATA_PATH)
     X_processed, gt_array = preprocess_admissions(df_raw)
 
-    # Scale data (Important for distance-based methods like LOF)
     scaler = StandardScaler()
     X_scaled = scaler.fit_transform(X_processed)
 
-    # Train LOF (novelty=False for anomaly detection on the training set)
-    # The negative_outlier_factor_ score is available after fit
-    lof_model = LocalOutlierFactor(n_neighbors=20, contamination='auto', novelty=False)
+    # LOF Training
+    lof_model = LocalOutlierFactor(
+        n_neighbors=20, contamination='auto', novelty=False
+    )
     lof_model.fit(X_scaled)
-    
-    # Get anomaly scores (negative_outlier_factor_: lower (more negative) is MORE anomalous)
+
+    # Raw LOF scores: more negative = more anomalous
     raw_scores = lof_model.negative_outlier_factor_
-    anomaly_scores = -raw_scores # Invert score so higher value means MORE anomalous
-    
-    print(f"Training complete.")
-    
-    # Evaluate using the 'hospital_expire_flag' as ground truth
-    eval_results = evaluate_anomaly_detection(gt_array, anomaly_scores)
+    anomaly_scores = -raw_scores   # invert to make "higher = more anomalous"
 
-    print(f"\nResults for ADMISSIONS.csv ({MODEL_NAME}):")
-    print(f"Ground Truth (Adverse Outcome): {np.sum(gt_array)} records out of {len(gt_array)}")
-    print(f"AUC={eval_results['AUC']:.4f} | F1={eval_results['F1']:.4f} | "
-          f"Precision={eval_results['Precision']:.4f} | Recall={eval_results['Recall']:.4f} | "
-          f"FAR={eval_results['FAR']:.4f}")
+    print("Training complete.")
 
-    # ======================
-    # Summary: Save Evaluation
-    # ======================
-    summary_data = {
-        "Model": [MODEL_NAME],
-        "AUC": [eval_results['AUC']],
-        "F1": [eval_results['F1']],
-        "Precision": [eval_results['Precision']],
-        "Recall": [eval_results['Recall']],
-        "FAR": [eval_results['FAR']],
-        "Reco_MSE": [np.nan],
-        "Reco_R2": [np.nan]
+    # =====================================================
+    # MULTI-THRESHOLD EVALUATION (90, 95, 98 percentiles)
+    # =====================================================
+    threshold_values = {
+        "90%": np.percentile(anomaly_scores, 90),
+        "95%": np.percentile(anomaly_scores, 95),
+        "98%": np.percentile(anomaly_scores, 98)
     }
-    
-    summary_df = pd.DataFrame(summary_data)
-    summary_file = SUMMARY_DIR / f"{MODEL_NAME}_ADMISSIONS_Evaluation_Summary.csv"
+
+    all_results = []
+    best_result = None
+
+    print("\n===== MULTI-THRESHOLD RESULTS =====")
+
+    for name, th in threshold_values.items():
+        metrics = compute_metrics(gt_array, anomaly_scores, th)
+        metrics["Threshold_Name"] = name
+        all_results.append(metrics)
+
+        print(f"\nThreshold {name} (value={th:.6f})")
+        print(f"AUC={metrics['AUC']:.4f} | Precision={metrics['Precision']:.4f} | "
+              f"Recall={metrics['Recall']:.4f} | F1={metrics['F1']:.4f} | FAR={metrics['FAR']:.4f}")
+
+        if best_result is None or metrics["F1"] > best_result["F1"]:
+            best_result = metrics
+
+    # ================================
+    # Best Threshold
+    # ================================
+    print("\n===== BEST THRESHOLD =====")
+    print(f"Best Threshold = {best_result['Threshold_Name']} ({best_result['Threshold']})")
+    print(f"Best F1 = {best_result['F1']:.4f}")
+    print(f"Precision={best_result['Precision']:.4f} | Recall={best_result['Recall']:.4f} | FAR={best_result['FAR']:.4f}")
+
+    # ================================
+    # Save Full Multi-Threshold Summary
+    # ================================
+    summary_df = pd.DataFrame(all_results)
+    summary_df["Model"] = MODEL_NAME
+    summary_file = SUMMARY_DIR / f"{MODEL_NAME}_ADMISSIONS_MultiThreshold_Summary.csv"
     summary_df.to_csv(summary_file, index=False)
-    print(f"\nEvaluation summary saved → {summary_file}")
+
+    print(f"\nSummary saved → {summary_file}")
 
     # ======================
-    # Plot anomalies (Focus on LOS)
+    # Plot using the BEST threshold
     # ======================
-    plt.figure(figsize=(12,6))
+    best_thr = best_result["Threshold"]
+    y_pred = (anomaly_scores >= best_thr).astype(int)
+    anomaly_indices = X_processed.index[y_pred == 1]
+
+    plt.figure(figsize=(12, 6))
     plt.scatter(X_processed.index, X_processed['LOS_hours'], 
-                c=anomaly_scores, cmap='viridis', s=20, label='LOS (Color by Anomaly Score)')
-    
-    # Identify model-detected anomalies based on best threshold
-    y_pred_model = (anomaly_scores >= eval_results['Threshold']).astype(int)
-    model_anomalies_indices = X_processed.index[y_pred_model == 1]
-    
-    # Mark the predicted anomalies
-    plt.scatter(model_anomalies_indices, X_processed.loc[model_anomalies_indices, 'LOS_hours'], 
-                color="red", marker="o", edgecolors='red', facecolors='none', s=100, 
-                label=f'Predicted Anomalies ({len(model_anomalies_indices)})')
+                c=anomaly_scores, cmap='viridis', s=20, label='Anomaly Score')
 
-    plt.title(f"ADMISSIONS Anomaly Detection ({MODEL_NAME}): LOS colored by Anomaly Score")
+    plt.scatter(anomaly_indices,
+                X_processed.loc[anomaly_indices, 'LOS_hours'],
+                color='red', edgecolors='red', facecolors='none', s=100,
+                label=f"Detected Anomalies ({len(anomaly_indices)})")
+
+    plt.title(f"{MODEL_NAME} - Anomalies using BEST Threshold ({best_result['Threshold_Name']})")
     plt.xlabel("Record Index")
     plt.ylabel("Length of Stay (Hours)")
-    plt.colorbar(label='Anomaly Score (Negative LOF Score)')
+    plt.colorbar(label='Anomaly Score (LOF inverted)')
     plt.legend()
-    plt.grid(True)
+    plt.grid()
     plt.tight_layout()
-    plt.savefig(OUTPUT_DIR / "ADMISSIONS_anomaly_plot_LOS.png")
+
+    plt.savefig(OUTPUT_DIR / "ADMISSIONS_best_threshold_plot.png")
     plt.close()
 
-    print(f"✅ {MODEL_NAME} Model completed successfully.")
+    print("\nLOF Multi-Threshold Evaluation Completed Successfully.")

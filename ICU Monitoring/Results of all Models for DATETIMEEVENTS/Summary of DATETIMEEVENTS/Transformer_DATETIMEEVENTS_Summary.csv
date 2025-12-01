@@ -1,0 +1,2 @@
+Total Samples,Detected Anomalies,True Anomalies,AUC,Precision,Recall,F1-score,FAR,Threshold,Features Used
+15531,0,0,,0.0,0.0,0.0,0,,10

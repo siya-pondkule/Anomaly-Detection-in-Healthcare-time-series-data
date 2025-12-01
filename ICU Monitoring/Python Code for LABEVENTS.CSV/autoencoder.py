@@ -3,6 +3,9 @@ import numpy as np
 import matplotlib.pyplot as plt
 from pathlib import Path
 from sklearn.preprocessing import StandardScaler
+from sklearn.metrics import (
+    roc_auc_score, precision_score, recall_score, f1_score, confusion_matrix
+)
 from tensorflow.keras import Model, Input
 from tensorflow.keras.layers import Dense, Dropout
 from tensorflow.keras.optimizers import Adam
@@ -29,50 +32,42 @@ print(f"Detected encoding: {encoding}")
 
 with open(DATA_PATH, "r", encoding=encoding, errors="ignore") as f:
     sample_lines = "\n".join([next(f) for _ in range(10)])
+
 delim_candidates = [",", ";", "|", "\t"]
 delim_counts = {d: sample_lines.count(d) for d in delim_candidates}
 best_delim = max(delim_counts, key=delim_counts.get)
-print(f"Detected delimiter: '{best_delim}' (counts={delim_counts})")
+print(f"Detected delimiter: '{best_delim}'")
 
 # ====================== Load CSV ======================
 df = pd.read_csv(DATA_PATH, encoding=encoding, delimiter=best_delim, engine="python", on_bad_lines="skip")
-print(f"✅ Loaded shape: {df.shape}")
-print(f"Columns: {df.columns.tolist()}")
+print(f"Loaded shape: {df.shape} | Columns: {df.columns.tolist()}")
 
 # ====================== Preprocessing ======================
-# Parse timestamps if exist
 for col in df.columns:
     if "time" in col.lower():
         df[col] = pd.to_datetime(df[col], errors="coerce")
 
-# Create time_diff feature (in minutes)
 if "subject_id" in df.columns and "charttime" in df.columns:
     df.sort_values(["subject_id", "charttime"], inplace=True)
     df["time_diff_min"] = df.groupby("subject_id")["charttime"].diff().dt.total_seconds() / 60.0
-    df["time_diff_min"].fillna(0, inplace=True)
-elif "charttime" in df.columns:
-    df.sort_values("charttime", inplace=True)
-    df["time_diff_min"] = df["charttime"].diff().dt.total_seconds() / 60.0
-    df["time_diff_min"].fillna(0, inplace=True)
 else:
     df["time_diff_min"] = np.arange(len(df))
 
-# Identify numeric columns
+df["time_diff_min"].fillna(0, inplace=True)
+
 numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
 if "time_diff_min" not in numeric_cols:
     numeric_cols.append("time_diff_min")
 
-print(f"🧮 Using numeric columns: {numeric_cols}")
+print(f"Using numeric columns: {numeric_cols}")
 
-# Clean numeric data
 df_num = df[numeric_cols].copy()
-for col in df_num.columns:
-    df_num[col] = pd.to_numeric(df_num[col], errors="coerce")
+df_num = df_num.apply(pd.to_numeric, errors="coerce")
 df_num.replace([np.inf, -np.inf], np.nan, inplace=True)
 df_num.dropna(how="all", inplace=True)
 
 if df_num.empty:
-    raise ValueError("❌ No usable numeric data found in LABEVENTS.csv.")
+    raise ValueError("No valid numeric data found.")
 
 # ====================== Scaling ======================
 scaler = StandardScaler()
@@ -80,22 +75,25 @@ X_scaled = scaler.fit_transform(df_num)
 
 # ====================== Autoencoder Model ======================
 input_dim = X_scaled.shape[1]
-input_layer = Input(shape=(input_dim,))
-encoded = Dense(128, activation="relu")(input_layer)
-encoded = Dropout(0.2)(encoded)
-encoded = Dense(64, activation="relu")(encoded)
-encoded = Dense(32, activation="relu")(encoded)
 
-decoded = Dense(64, activation="relu")(encoded)
-decoded = Dense(128, activation="relu")(decoded)
-decoded = Dropout(0.2)(decoded)
-output_layer = Dense(input_dim, activation="linear")(decoded)
+inputs = Input(shape=(input_dim,))
+x = Dense(128, activation="relu")(inputs)
+x = Dropout(0.2)(x)
+x = Dense(64, activation="relu")(x)
+x = Dense(32, activation="relu")(x)
 
-autoencoder = Model(inputs=input_layer, outputs=output_layer)
-autoencoder.compile(optimizer=Adam(learning_rate=1e-3), loss="mse")
+x = Dense(64, activation="relu")(x)
+x = Dense(128, activation="relu")(x)
+x = Dropout(0.2)(x)
 
-# ====================== Train Model ======================
+outputs = Dense(input_dim, activation="linear")(x)
+
+autoencoder = Model(inputs, outputs)
+autoencoder.compile(optimizer=Adam(1e-3), loss="mse")
+
 es = EarlyStopping(monitor="val_loss", patience=8, restore_best_weights=True)
+
+# Train
 history = autoencoder.fit(
     X_scaled, X_scaled,
     epochs=50,
@@ -106,36 +104,82 @@ history = autoencoder.fit(
     verbose=1
 )
 
-# ====================== Anomaly Detection ======================
-reconstructions = autoencoder.predict(X_scaled)
-mse = np.mean(np.square(X_scaled - reconstructions), axis=1)
-threshold = np.percentile(mse, 95)
-anomalies = mse > threshold
-print(f"\n🚨 Detected {np.sum(anomalies)} anomalies out of {len(mse)} (Threshold = {threshold:.6f})")
+# ====================== Reconstruction Error ======================
+recons = autoencoder.predict(X_scaled)
+mse = np.mean(np.square(X_scaled - recons), axis=1)
+
+# ====================== Ground Truth (no real labels available) ======================
+gt = np.zeros(len(mse), dtype=int)
+
+# ====================== MULTI-THRESHOLD EVALUATION ======================
+thresholds = [90, 95, 98]
+eval_rows = []
+best_f1 = -1
+best_row = None
+
+for pct in thresholds:
+    thr = np.percentile(mse, pct)
+    y_pred = (mse >= thr).astype(int)
+
+    # Metrics
+    try:
+        auc = roc_auc_score(gt, mse)
+    except:
+        auc = np.nan
+
+    precision = precision_score(gt, y_pred, zero_division=0)
+    recall = recall_score(gt, y_pred, zero_division=0)
+    f1 = f1_score(gt, y_pred, zero_division=0)
+
+    cm = confusion_matrix(gt, y_pred)
+    tn, fp, fn, tp = cm.ravel() if cm.size == 4 else (0,0,0,0)
+    far = fp / (fp + tn) if (fp + tn) else 0
+
+    row = {
+        "Threshold_%": pct,
+        "Threshold_Value": thr,
+        "AUC": auc,
+        "Precision": precision,
+        "Recall": recall,
+        "F1": f1,
+        "FAR": far,
+        "TP": tp, "FP": fp, "TN": tn, "FN": fn,
+        "Detected_Anomalies": int(y_pred.sum())
+    }
+    eval_rows.append(row)
+
+    if f1 > best_f1:
+        best_f1 = f1
+        best_row = row.copy()
+
+# Save CSV files
+multi_df = pd.DataFrame(eval_rows)
+multi_df.to_csv(SUMMARY_DIR / "LABEVENTS_MultiThresholdSummary.csv", index=False)
+
+pd.DataFrame([best_row]).to_csv(SUMMARY_DIR / "LABEVENTS_BestThreshold.csv", index=False)
+
+print("\n=== MULTI-THRESHOLD EVALUATION ===")
+print(multi_df)
+print("\n=== BEST THRESHOLD ===")
+print(best_row)
+
+# ====================== Apply Best Threshold ======================
+best_threshold = best_row["Threshold_Value"]
+final_pred = (mse >= best_threshold).astype(int)
+anomaly_indices = np.where(final_pred == 1)[0]
 
 # ====================== Save Results ======================
 results_df = pd.DataFrame({
     "reconstruction_error": mse,
-    "is_anomaly": anomalies.astype(int)
+    "is_anomaly": final_pred
 })
-results_path = OUTPUT_DIR / "LABEVENTS_Autoencoder_Results.csv"
-results_df.to_csv(results_path, index=False)
-print(f"✅ Results saved to {results_path}")
-
-summary = {
-    "total_records": len(mse),
-    "detected_anomalies": int(np.sum(anomalies)),
-    "anomaly_percentage": round(100 * np.sum(anomalies) / len(mse), 3),
-    "threshold_95pct": float(threshold)
-}
-pd.DataFrame([summary]).to_csv(SUMMARY_DIR / "Autoencoder_LABEVENTS_Summary.csv", index=False)
-print(f"✅ Summary saved → {SUMMARY_DIR / 'Autoencoder_LABEVENTS_Summary.csv'}")
+results_df.to_csv(OUTPUT_DIR / "LABEVENTS_Autoencoder_Results.csv", index=False)
 
 # ====================== Plot ======================
 plt.figure(figsize=(12,6))
 plt.plot(mse, label="Reconstruction Error", alpha=0.7)
-plt.axhline(threshold, color='orange', linestyle='--', label="Threshold (95th %)")
-plt.scatter(np.where(anomalies)[0], mse[anomalies], color='red', marker='x', label="Anomalies")
+plt.axhline(best_threshold, color='orange', linestyle='--', label=f"Best Threshold ({best_row['Threshold_%']}%)")
+plt.scatter(anomaly_indices, mse[anomaly_indices], color='red', marker='x', label="Anomalies")
 plt.title("Autoencoder Anomaly Detection - LABEVENTS")
 plt.xlabel("Record Index")
 plt.ylabel("Reconstruction Error (MSE)")
@@ -144,6 +188,7 @@ plt.grid(True)
 plt.tight_layout()
 plt.savefig(OUTPUT_DIR / "LABEVENTS_Autoencoder_AnomalyPlot.png")
 plt.close()
-print(f"✅ Plot saved → {OUTPUT_DIR / 'LABEVENTS_Autoencoder_AnomalyPlot.png'}")
 
-print("\n🎯 Autoencoder training and anomaly detection completed successfully!")
+print("\n🎯 Autoencoder anomaly detection completed successfully!")
+print("📌 Multi-threshold summary saved.")
+print("📌 Best threshold saved.")
